@@ -1,0 +1,9 @@
+{
+  "name": "Gemini Conversational AI Showcase",
+  "description": "An application demonstrating various conversational AI capabilities of the Gemini API, including real-time voice chat, deep thinking for complex queries, and fast, persona-driven text chat.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera",
+    "display-capture"
+  ]
+}
