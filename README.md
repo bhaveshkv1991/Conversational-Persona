@@ -1,86 +1,80 @@
+
 # Gemini Conversational AI Showcase
 
-A high-fidelity React application demonstrating the capabilities of the **Google Gemini Live API**. This project serves as a reference implementation for building real-time, multimodal AI agents that can see, hear, and speak.
+A high-fidelity, real-time multimodal conversational agent built with React and the Google GenAI SDK. This application demonstrates the power of the **Gemini Live API** by simulating a professional video meeting where the AI is an active, seeing, and hearing participant.
 
-## 🚀 Features
+## 🌟 Key Features
 
-*   **Real-Time Voice Interaction**: Utilizes WebSocket-based streaming for low-latency, bidirectional audio conversations with Gemini.
-*   **Visual Context Awareness**: Supports screen sharing, where video frames are sampled and sent to the model, allowing the AI to analyze and discuss visual content (code, diagrams, UIs) in real-time.
-*   **Persona System**: Includes pre-configured expert personas (Security Engineer, Software Architect, QA Lead) and allows for custom prompt configuration.
-*   **Live Transcription**: Displays real-time speech-to-text logs for both the user and the AI.
-*   **Audio Processing**: Implements raw PCM audio encoding/decoding and sample rate conversion for compatibility with the Gemini Live API.
+*   **Real-Time Bi-Directional Audio:** Speak naturally with the AI. The application streams raw audio to Gemini and plays back the response with low latency, supporting interruptions and natural turn-taking.
+*   **Visual Context (Screen Sharing):** Share your screen during the call. The AI receives video frames in real-time, allowing it to analyze code, review designs, or debug UIs alongside you.
+*   **Role-Based Expert Personas:**
+    *   **Principal Architect:** Reviews system designs and scalability.
+    *   **Security Threat Modeller:** Analyzes architecture for vulnerabilities.
+    *   **QA Engineer:** Discusses testing strategies and edge cases.
+    *   **Custom Expert:** Define your own persona with custom system prompts.
+*   **Hybrid Interface:** Seamlessly switch between voice conversation and text chat, with a unified real-time transcription log.
+*   **Browser-Native:** Uses Web Audio API and WebRTC standards for a plugin-free experience.
 
-## 🛠️ Tech Stack
+## 🛠️ Technologies
 
-*   **Frontend**: React 19, Vite, TypeScript
-*   **Styling**: Tailwind CSS
-*   **AI Integration**: `@google/genai` SDK (Gemini 2.5 Flash/Pro models)
-*   **Audio/Video**: Web Audio API, MediaStream API, HTML5 Canvas (for frame extraction)
+*   **Frontend Framework:** React 19 (Vite)
+*   **Styling:** Tailwind CSS
+*   **AI SDK:** `@google/genai` (Gemini 2.5 Flash & Flash Lite models)
+*   **Audio Processing:** Web Audio API (`ScriptProcessorNode`, `AudioContext`) for PCM streaming.
 
-## 📋 Prerequisites
+## 🚀 Setup & Installation
 
-*   Node.js (v18 or higher)
-*   A modern web browser (Chrome/Edge recommended for full Web Audio API support)
-*   A valid **Google Cloud Project** with Gemini API access enabled.
+### 1. Clone the Repository
+```bash
+git clone <repository_url>
+cd gemini-conversational-showcase
+```
 
-## ⚙️ Installation
+### 2. Install Dependencies
+```bash
+npm install
+```
 
-1.  **Clone the repository**
-    ```bash
-    git clone <repository-url>
-    cd gemini-conversational-showcase
-    ```
+### 3. API Key Configuration (Crucial!)
+This application requires a valid Google Cloud API Key with access to the **Gemini API**.
 
-2.  **Install dependencies**
-    ```bash
-    npm install
-    ```
+**Why do I need to provide a key?**
+The Gemini Live API uses high-performance models that incur costs and usage limits. A user-provided key ensures proper billing attribution, security (so your key isn't exposed), and prevents rate-limiting issues.
 
-3.  **Environment Setup**
-    The application expects the API key to be handled via the `process.env.API_KEY` variable or the `window.aistudio` selection tool (if running within Google AI Studio environments).
+**Option A: Environment Variable (Recommended for Local Dev)**
+Create a `.env` file in the project root:
+```env
+VITE_API_KEY=your_google_cloud_api_key_here
+```
+*Ensure your build tool (Vite) is configured to expose this as `process.env.API_KEY`.*
 
-    For local development, ensure your bundler injects the key or configure a `.env` file:
-    ```env
-    VITE_API_KEY=your_api_key_here
-    ```
-    *(Note: You may need to adjust the code in `MeetingRoom.tsx` to use `import.meta.env.VITE_API_KEY` if strictly using Vite env vars, or rely on the provided `window.aistudio` flow)*.
+**Option B: AI Studio / IDX**
+If running inside Google AI Studio or Project IDX, the application includes a built-in key selection dialog (`window.aistudio`) that handles key injection automatically.
 
-4.  **Run the development server**
-    ```bash
-    npm run dev
-    ```
+### 4. Run the Application
+```bash
+npm run dev
+```
+Open your browser to `http://localhost:5173` (or the port shown in your terminal).
 
-## 📖 Usage Guide
+## ⚠️ Troubleshooting
 
-### 1. The Lobby
-Upon launching, you will enter the Lobby.
-*   **Permissions**: Grant access to your microphone and camera.
-*   **API Key**: If prompted, select your Google Cloud Project API key.
-*   **Join**: Enter your name and click "Join Now".
+### "Network Error" / Connection Failed
+If you encounter a **"Connection error: Error: Network error"** when adding an AI bot:
+1.  **Check API Key:** Ensure `process.env.API_KEY` is set. The client will fail immediately without it.
+2.  **Enable API:** Go to the Google Cloud Console and ensure the **"Generative Language API"** is enabled for your project.
+3.  **Billing:** The Multimodal Live API (Gemini 2.5) may require a billing-enabled project.
+4.  **Permissions:** Ensure microphone and camera permissions are granted.
 
-### 2. The Meeting Room
-The main interface represents a video call.
-*   **Add AI Expert**: Click the "+" button (or "Add AI Expert") to invite a bot.
-    *   Select a specific role (e.g., *Lead Security Threat Modeller*).
-    *   The AI will join and greet you.
-*   **Voice Chat**: Speak naturally. The AI will listen and respond.
-    *   Use the **Microphone** icon to mute/unmute yourself.
-    *   Use the **Red Phone** icon to leave the call.
-*   **Screen Sharing**: Click the **Screen Share** icon to present your screen to the AI.
-    *   *Note:* The AI will automatically start receiving video frames of your shared screen and can answer questions about what is visible.
-*   **Text Chat**: You can type messages in the sidebar if you prefer text or need to paste code snippets.
+### "Disconnected" when Screen Sharing
+This usually happens if the screen resolution is too high for the real-time websocket connection. The app automatically downscales frames to 1024px width to prevent this, but if you still face issues, try sharing a specific window instead of the entire screen.
 
-## 🧩 Architecture Highlights
+## 📖 Architecture Overview
 
-### Audio Streaming
-The app uses the `AudioContext` API to capture raw PCM data from the microphone. This data is downsampled (if necessary) and sent via the `LiveSession` connection. Incoming audio from the model is decoded from Base64 and played back using an `AudioBufferSourceNode` queue to ensure gapless playback.
+### Audio Pipeline
+*   **Input:** Microphone audio is captured at 16kHz via `AudioContext`. Raw PCM data is extracted using a `ScriptProcessorNode` and sent via WebSocket to the Gemini Live endpoint.
+*   **Output:** Incoming audio chunks (Base64 PCM) are decoded and queued in an `AudioBufferSourceNode` sequence to ensure gapless playback.
 
-### Video Streaming
-Video is not sent as a continuous stream but as a sequence of images. When screen sharing is active, the app draws the `<video>` element to a hidden `<canvas>`, converts it to a JPEG Blob, and sends it to the model via `session.sendRealtimeInput` roughly once per second.
-
-### Personas
-Personas are defined in `constants.ts`. Each persona consists of a specific `systemInstruction` that primes the model's behavior, tone, and knowledge base before the conversation begins.
-
-## 📄 License
-
-MIT License
+### Visual Pipeline
+*   **Screen Share:** When screen sharing is active, the `<video>` element is drawn to an off-screen `<canvas>` roughly once per second.
+*   **Transmission:** These frames are converted to JPEG blobs and sent as `realtimeInput` to the model, providing it with continuous visual context.

@@ -125,6 +125,13 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
   useEffect(() => {
     conversationEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [conversationHistory]);
+
+  // Ensure videoRef always has the stream when layout changes (e.g., screen share toggle)
+  useEffect(() => {
+      if (videoRef.current && userStreamRef.current) {
+          videoRef.current.srcObject = userStreamRef.current;
+      }
+  }, [isSharingScreen]);
   
   const stopFrameSending = useCallback(() => {
     if (frameIntervalRef.current) {
@@ -149,21 +156,40 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
       } catch (e) { console.error('Error closing session:', e); }
       sessionPromiseRef.current = null;
     }
-    if (scriptProcessorRef.current) scriptProcessorRef.current.disconnect();
-    if (mediaStreamSourceRef.current) mediaStreamSourceRef.current.disconnect();
-    if (audioContextRef.current?.state !== 'closed') audioContextRef.current?.close();
-    if (outputAudioContextRef.current?.state !== 'closed') outputAudioContextRef.current?.close();
+    if (scriptProcessorRef.current) {
+        try { scriptProcessorRef.current.disconnect(); } catch(e) {}
+    }
+    if (mediaStreamSourceRef.current) {
+        try { mediaStreamSourceRef.current.disconnect(); } catch(e) {}
+    }
+    if (audioContextRef.current?.state !== 'closed') {
+        try { await audioContextRef.current?.close(); } catch(e) {}
+    }
+    if (outputAudioContextRef.current?.state !== 'closed') {
+        try { await outputAudioContextRef.current?.close(); } catch(e) {}
+    }
     chatRef.current = null;
   }, [stopFrameSending]);
   
   const handleAddBot = (botJoinConfig: { persona: Persona, systemPrompt: string }) => {
+    const apiKey = process.env.API_KEY;
+    if (!apiKey) {
+        alert("API Key is missing. Please ensure a valid API Key is provided in the code or environment variables.");
+        return;
+    }
+    
     setBotConfig(botJoinConfig);
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
-    chatRef.current = ai.chats.create({
-      model: 'gemini-flash-lite-latest',
-      config: { systemInstruction: botJoinConfig.systemPrompt },
-    });
-    setShowAddBotModal(false);
+    try {
+        const ai = new GoogleGenAI({ apiKey });
+        chatRef.current = ai.chats.create({
+          model: 'gemini-2.5-flash',
+          config: { systemInstruction: botJoinConfig.systemPrompt },
+        });
+        setShowAddBotModal(false);
+    } catch (e) {
+        console.error("Failed to initialize chat client:", e);
+        alert("Failed to initialize AI client. Check console for details.");
+    }
   };
   
   const handleRemoveBot = useCallback(() => {
@@ -180,8 +206,14 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
       
       const video = screenVideoRef.current;
       const canvas = canvasRef.current;
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
+      
+      // Scale down large screens to avoid websocket payload limits (disconnects)
+      const MAX_WIDTH = 1024;
+      const scale = Math.min(1, MAX_WIDTH / video.videoWidth);
+      
+      canvas.width = video.videoWidth * scale;
+      canvas.height = video.videoHeight * scale;
+      
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
       
@@ -204,9 +236,14 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
   }, [stopFrameSending]);
 
   const startConversation = useCallback(async (stream: MediaStream, systemPrompt: string) => {
+    const apiKey = process.env.API_KEY;
+    if (!apiKey) return;
+
+    // Avoid restarting if session is already active for the same config? 
+    // For now, we always restart to ensure fresh state.
     if (sessionPromiseRef.current) await stopConversation();
     
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+    const ai = new GoogleGenAI({ apiKey });
     
     const conversationalStylePrompt = `Speak just like a real person—warm, natural, and clear. Use simple language and avoid technical jargon unless the user uses it first. Be concise; don’t stretch the discussion or add unnecessary details. Stay focused on what the user asks. When needed, ask short clarifying questions. Keep the conversation smooth, friendly, and human-like.`;
 
@@ -224,17 +261,22 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
         onopen: () => {
           console.log('Connection opened.');
           if (!audioContextRef.current || audioContextRef.current.state === 'closed') return;
-          const source = audioContextRef.current!.createMediaStreamSource(stream);
+          
+          // Create media stream source from the stream
+          const source = audioContextRef.current.createMediaStreamSource(stream);
           mediaStreamSourceRef.current = source;
-          const scriptProcessor = audioContextRef.current!.createScriptProcessor(4096, 1, 1);
+          
+          const scriptProcessor = audioContextRef.current.createScriptProcessor(4096, 1, 1);
           scriptProcessorRef.current = scriptProcessor;
+          
           scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
             const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
             const pcmBlob: Blob = createBlob(inputData);
             sessionPromiseRef.current?.then(session => session.sendRealtimeInput({ media: pcmBlob }));
           };
+          
           source.connect(scriptProcessor);
-          scriptProcessor.connect(audioContextRef.current.destination); // Required for onaudioprocess to fire in all browsers
+          scriptProcessor.connect(audioContextRef.current.destination); 
         },
         onmessage: async (message: LiveServerMessage) => {
           if (message.serverContent?.outputTranscription) {
@@ -280,13 +322,13 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
         },
         onerror: (e: ErrorEvent) => { 
           console.error('Connection error:', e);
-          alert('Failed to connect to the AI service. This could be due to a network issue or an invalid API key. Please check your connection and API key, then try joining again.');
-          onLeave();
+          alert('Connection Failed: Ensure your API Key is valid and "Generative Language API" is enabled in Google Cloud.');
+          handleRemoveBot();
         },
         onclose: (e: CloseEvent) => { console.log('Connection closed.'); },
       },
     });
-  }, [handleRemoveBot, stopConversation, onLeave]);
+  }, [handleRemoveBot, stopConversation]);
   
   useEffect(() => {
     if (isSharingScreen && botConfig) {
@@ -325,17 +367,38 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
       
     return () => {
         stopConversation();
-        // If we requested the stream locally (not passed via config), or if we assume ownership, we stop it.
-        // Since Lobby passes it and expects MeetingRoom to "take over", we stop it here on unmount.
-        localStream?.getTracks().forEach(track => track.stop());
+        // IMPORTANT: In React Strict Mode (dev), components mount/unmount twice.
+        // If we stop the tracks of the passed `config.stream` here, the stream becomes dead for the second mount.
+        // We ONLY stop the tracks if we created the stream internally (localStream exists AND it's NOT config.stream).
+        if (localStream && localStream !== config.stream) {
+            localStream.getTracks().forEach(track => track.stop());
+        }
     };
   }, [stopConversation, onLeave, config.stream]);
 
   useEffect(() => {
       if (botConfig && userStreamRef.current) {
-          startConversation(userStreamRef.current, botConfig.systemPrompt);
+          // Check if stream is active before starting
+          if (userStreamRef.current.active) {
+              startConversation(userStreamRef.current, botConfig.systemPrompt);
+          } else {
+              console.error("Stream is inactive, cannot start conversation");
+              alert("Media stream is inactive. Please rejoin the meeting.");
+          }
       }
   }, [botConfig, startConversation]);
+
+  const handleLeaveCall = useCallback(() => {
+    stopConversation();
+    // Explicitly stop tracks when user intentionally leaves the call
+    if (config.stream) {
+        config.stream.getTracks().forEach(t => t.stop());
+    }
+    if (userStreamRef.current && userStreamRef.current !== config.stream) {
+        userStreamRef.current.getTracks().forEach(t => t.stop());
+    }
+    onLeave();
+  }, [stopConversation, config.stream, onLeave]);
 
   const handleSendChatMessage = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -496,7 +559,7 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
               <button onClick={handleToggleScreenShare} className={`p-3 rounded-full transition-colors ${isSharingScreen ? 'bg-blue-600 text-white' : 'bg-zinc-700 hover:bg-zinc-600 text-white'}`} aria-label={isSharingScreen ? 'Stop sharing screen' : 'Share screen'}>
                 <ScreenShareIcon className="w-6 h-6" />
               </button>
-              <button onClick={onLeave} className="p-3 rounded-full bg-red-600 hover:bg-red-500 text-white" aria-label="Leave call">
+              <button onClick={handleLeaveCall} className="p-3 rounded-full bg-red-600 hover:bg-red-500 text-white" aria-label="Leave call">
               <PhoneIcon className="w-6 h-6" />
               </button>
           </div>
