@@ -2,7 +2,7 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { GoogleGenAI, Modality, LiveSession, Chat, type LiveServerMessage, type Blob } from '@google/genai';
 import { decode, encode, decodeAudioData } from '../services/audioUtils';
-import { MicIcon, MicSlashIcon, PhoneIcon, BotIcon, PlusIcon, XIcon, SendIcon, ScreenShareIcon } from './icons/Icons';
+import { MicIcon, MicSlashIcon, PhoneIcon, BotIcon, PlusIcon, XIcon, SendIcon, ScreenShareIcon, PaperClipIcon, ArrowPathIcon } from './icons/Icons';
 import type { MeetingConfig, ConversationEntry, BotState, Persona, ChatMessage } from '../types';
 import { PERSONAS } from '../constants';
 import { MarkdownRenderer } from './MarkdownRenderer';
@@ -95,11 +95,13 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
   const [botConfig, setBotConfig] = useState<{ persona: Persona; systemPrompt: string } | null>(null);
   const [showAddBotModal, setShowAddBotModal] = useState(false);
   const [botState, setBotState] = useState<BotState>('listening');
+  const [connectionStatus, setConnectionStatus] = useState<'idle' | 'connecting' | 'connected' | 'disconnected'>('idle');
   const [conversationHistory, setConversationHistory] = useState<ConversationEntry[]>([]);
   const [isMuted, setIsMuted] = useState(false);
   const [chatInput, setChatInput] = useState('');
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [isSharingScreen, setIsSharingScreen] = useState(false);
+  const [attachment, setAttachment] = useState<{ file: File; type: 'image' | 'text' | 'pdf' | 'unknown'; preview: string } | null>(null);
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const userStreamRef = useRef<MediaStream | null>(null);
@@ -107,6 +109,7 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
   const screenStreamRef = useRef<MediaStream | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(document.createElement('canvas'));
   const frameIntervalRef = useRef<number | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const sessionPromiseRef = useRef<Promise<LiveSession> | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -140,7 +143,7 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
     }
   }, []);
 
-  const stopConversation = useCallback(async () => {
+  const disconnectSession = useCallback(async (isCleanup: boolean = false) => {
     stopFrameSending();
     if (sourcesRef.current) {
         for (const source of sourcesRef.current.values()) {
@@ -169,6 +172,10 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
         try { await outputAudioContextRef.current?.close(); } catch(e) {}
     }
     chatRef.current = null;
+
+    if (isCleanup) {
+        setConnectionStatus('idle');
+    }
   }, [stopFrameSending]);
   
   const handleAddBot = (botJoinConfig: { persona: Persona, systemPrompt: string }) => {
@@ -193,11 +200,12 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
   };
   
   const handleRemoveBot = useCallback(() => {
-    stopConversation();
+    disconnectSession(true);
     setBotConfig(null);
     setConversationHistory([]);
     setBotState('listening');
-  }, [stopConversation]);
+    setConnectionStatus('idle');
+  }, [disconnectSession]);
 
   const startFrameSending = useCallback(() => {
     stopFrameSending(); // Ensure no multiple intervals running
@@ -235,21 +243,28 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
     }, 1000); // 1 frame per second
   }, [stopFrameSending]);
 
-  const startConversation = useCallback(async (stream: MediaStream, systemPrompt: string) => {
+  const startConversation = useCallback(async (stream: MediaStream, systemPrompt: string, previousContext: string = '') => {
     const apiKey = process.env.API_KEY;
     if (!apiKey) return;
 
-    // Avoid restarting if session is already active for the same config? 
-    // For now, we always restart to ensure fresh state.
-    if (sessionPromiseRef.current) await stopConversation();
+    if (sessionPromiseRef.current) await disconnectSession();
     
+    setConnectionStatus('connecting');
+
     const ai = new GoogleGenAI({ apiKey });
     
     const conversationalStylePrompt = `Speak just like a real person—warm, natural, and clear. Use simple language and avoid technical jargon unless the user uses it first. Be concise; don’t stretch the discussion or add unnecessary details. Stay focused on what the user asks. When needed, ask short clarifying questions. Keep the conversation smooth, friendly, and human-like.`;
 
     const meetingBehaviorPrompt = `You are a helpful AI assistant in a meeting. Your goal is to be a seamless, helpful participant. Listen to the user and continuously observe their screen when they are sharing. Proactively use the visual information from the screen as context for your responses without waiting for the user to tell you to look. Respond directly and conversationally when the user speaks to you or when you have a relevant insight based on the conversation or the shared screen. Be proactive but not interruptive. Keep your responses concise and to the point.`;
     
-    const systemInstruction = `${systemPrompt} ${conversationalStylePrompt} ${meetingBehaviorPrompt}`;
+    // Inject user name into the context
+    const userContext = `The user you are speaking with is named ${config.userName}. Address them by name naturally in the conversation, but do not overdo it.`;
+
+    let systemInstruction = `${userContext} ${systemPrompt} ${conversationalStylePrompt} ${meetingBehaviorPrompt}`;
+
+    if (previousContext) {
+        systemInstruction += `\n\nIMPORTANT: The connection was interrupted. Below is the transcript of the conversation so far. Resume the conversation naturally from where it left off. Do not simply repeat the last message.\n\n[PREVIOUS_TRANSCRIPT_START]\n${previousContext}\n[PREVIOUS_TRANSCRIPT_END]`;
+    }
 
     audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
     outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
@@ -260,6 +275,7 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
       callbacks: {
         onopen: () => {
           console.log('Connection opened.');
+          setConnectionStatus('connected');
           if (!audioContextRef.current || audioContextRef.current.state === 'closed') return;
           
           // Create media stream source from the stream
@@ -322,16 +338,33 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
         },
         onerror: (e: ErrorEvent) => { 
           console.error('Connection error:', e);
-          alert('Connection Failed: Ensure your API Key is valid and "Generative Language API" is enabled in Google Cloud.');
-          handleRemoveBot();
+          setConnectionStatus('disconnected');
         },
-        onclose: (e: CloseEvent) => { console.log('Connection closed.'); },
+        onclose: (e: CloseEvent) => { 
+            console.log('Connection closed.'); 
+            setConnectionStatus(prev => prev === 'connected' ? 'disconnected' : prev);
+        },
       },
     });
-  }, [handleRemoveBot, stopConversation]);
+  }, [disconnectSession, config.userName]);
+
+  const handleReconnect = useCallback(() => {
+      if (!botConfig || !userStreamRef.current) return;
+
+      // Format recent history to provide context
+      const historyContext = conversationHistory.slice(-30).map(entry => {
+          if (entry.type === 'transcription') {
+              return `${entry.speaker === 'user' ? 'User' : 'AI'}: ${entry.text}`;
+          } else {
+              return `${entry.role === 'user' ? 'User' : 'AI'}: ${entry.text}`;
+          }
+      }).join('\n');
+
+      startConversation(userStreamRef.current, botConfig.systemPrompt, historyContext);
+  }, [botConfig, conversationHistory, startConversation]);
   
   useEffect(() => {
-    if (isSharingScreen && botConfig) {
+    if (isSharingScreen && botConfig && connectionStatus === 'connected') {
         sessionPromiseRef.current?.then(() => {
             startFrameSending();
         });
@@ -341,7 +374,7 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
     return () => {
         stopFrameSending();
     };
-}, [isSharingScreen, botConfig, startFrameSending, stopFrameSending]);
+}, [isSharingScreen, botConfig, connectionStatus, startFrameSending, stopFrameSending]);
 
   useEffect(() => {
     let localStream: MediaStream | null = null;
@@ -366,19 +399,15 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
     initMedia();
       
     return () => {
-        stopConversation();
-        // IMPORTANT: In React Strict Mode (dev), components mount/unmount twice.
-        // If we stop the tracks of the passed `config.stream` here, the stream becomes dead for the second mount.
-        // We ONLY stop the tracks if we created the stream internally (localStream exists AND it's NOT config.stream).
+        disconnectSession(true);
         if (localStream && localStream !== config.stream) {
             localStream.getTracks().forEach(track => track.stop());
         }
     };
-  }, [stopConversation, onLeave, config.stream]);
+  }, [disconnectSession, onLeave, config.stream]);
 
   useEffect(() => {
-      if (botConfig && userStreamRef.current) {
-          // Check if stream is active before starting
+      if (botConfig && userStreamRef.current && connectionStatus === 'idle') {
           if (userStreamRef.current.active) {
               startConversation(userStreamRef.current, botConfig.systemPrompt);
           } else {
@@ -386,11 +415,10 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
               alert("Media stream is inactive. Please rejoin the meeting.");
           }
       }
-  }, [botConfig, startConversation]);
+  }, [botConfig, startConversation, connectionStatus]);
 
   const handleLeaveCall = useCallback(() => {
-    stopConversation();
-    // Explicitly stop tracks when user intentionally leaves the call
+    disconnectSession(true);
     if (config.stream) {
         config.stream.getTracks().forEach(t => t.stop());
     }
@@ -398,21 +426,102 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
         userStreamRef.current.getTracks().forEach(t => t.stop());
     }
     onLeave();
-  }, [stopConversation, config.stream, onLeave]);
+  }, [disconnectSession, config.stream, onLeave]);
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      let type: 'image' | 'text' | 'pdf' | 'unknown' = 'unknown';
+      let preview = '';
+
+      if (file.type.startsWith('image/')) {
+        type = 'image';
+        preview = URL.createObjectURL(file);
+      } else if (file.type === 'text/plain' || file.type === 'text/markdown' || file.type === 'application/json' || file.type === 'text/csv' || file.type === 'text/xml') {
+        type = 'text';
+        preview = '📄 ' + file.name;
+      } else if (file.type === 'application/pdf') {
+        type = 'pdf';
+        preview = '📕 ' + file.name;
+      } else {
+          alert("Unsupported file type. Please upload images, text files, JSON, CSV, or PDFs.");
+          return;
+      }
+
+      setAttachment({ file, type, preview });
+    }
+  };
+
+  const removeAttachment = () => {
+    if (attachment?.type === 'image') {
+        URL.revokeObjectURL(attachment.preview);
+    }
+    setAttachment(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
 
   const handleSendChatMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!chatInput.trim() || isChatLoading || !chatRef.current) return;
+    if ((!chatInput.trim() && !attachment) || isChatLoading || !chatRef.current) return;
 
-    const userMessage: ChatMessage = { type: 'chat', role: 'user', text: chatInput };
-    setConversationHistory(prev => [...prev, userMessage]);
+    const messageText = chatInput.trim();
+    const attachedFile = attachment; // capture current reference
+    
+    // Reset UI immediately
     setChatInput('');
+    setAttachment(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
     setIsChatLoading(true);
 
+    // Update conversation history
+    let displayMessage = messageText;
+    if (attachedFile) {
+        displayMessage = `[Attached: ${attachedFile.file.name}]\n${messageText}`;
+    }
+    setConversationHistory(prev => [...prev, { type: 'chat', role: 'user', text: displayMessage }]);
+
     try {
-      const stream = await chatRef.current.sendMessageStream({ message: chatInput });
+      let messageParts: any[] = [];
+      if (messageText) {
+        messageParts.push({ text: messageText });
+      }
+
+      if (attachedFile) {
+        const base64Data = await blobToBase64(attachedFile.file);
+        
+        // 1. Add to Chat Context
+        messageParts.push({
+            inlineData: {
+                mimeType: attachedFile.file.type,
+                data: base64Data
+            }
+        });
+
+        // 2. Send to Live Session (Voice Bot) if applicable and supported
+        if (sessionPromiseRef.current && connectionStatus === 'connected') {
+            const session = await sessionPromiseRef.current;
+            try {
+                 // We send the visual/document context to the live session so the voice bot can "see" it.
+                 if (attachedFile.type === 'image' || attachedFile.type === 'pdf' || attachedFile.type === 'text') {
+                     await session.sendRealtimeInput({ 
+                        media: { 
+                            mimeType: attachedFile.file.type, 
+                            data: base64Data 
+                        } 
+                     });
+                     console.log(`Sent ${attachedFile.type} attachment to Live Session context`);
+                 }
+            } catch (err) {
+                console.error("Failed to send attachment to Live Session:", err);
+            }
+        }
+      }
+      
+      const stream = await chatRef.current.sendMessageStream({ message: messageParts });
+      
       let fullResponse = '';
       setConversationHistory(prev => [...prev, { type: 'chat', role: 'model', text: '...' }]);
+      
       for await (const chunk of stream) {
         fullResponse += chunk.text;
         setConversationHistory(prev => {
@@ -426,7 +535,7 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
       }
     } catch (err) {
       console.error('Error sending message:', err);
-      setConversationHistory(prev => [...prev, { type: 'chat', role: 'model', text: 'Sorry, I encountered an error.' }]);
+      setConversationHistory(prev => [...prev, { type: 'chat', role: 'model', text: 'Sorry, I encountered an error processing your message.' }]);
     } finally {
       setIsChatLoading(false);
     }
@@ -478,13 +587,21 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
     }
   };
 
-  const botBorderClass = botState === 'speaking' 
-    ? 'ring-2 ring-green-500' 
-    : 'ring-1 ring-zinc-700';
+  const botBorderClass = connectionStatus === 'disconnected' 
+    ? 'ring-2 ring-red-500'
+    : botState === 'speaking' 
+        ? 'ring-2 ring-green-500' 
+        : 'ring-1 ring-zinc-700';
 
-  const botStatusColor = botState === 'speaking' ? 'bg-green-500' : 'bg-blue-500';
+  const botStatusColor = connectionStatus === 'disconnected'
+    ? 'bg-red-500'
+    : botState === 'speaking' 
+        ? 'bg-green-500' 
+        : 'bg-blue-500';
 
   const getBotStatusText = () => {
+    if (connectionStatus === 'disconnected') return 'Disconnected';
+    if (connectionStatus === 'connecting') return 'Connecting...';
     if (isSharingScreen && botState === 'listening') return 'Analyzing Screen';
     if (botState === 'hand_raised') return 'Hand Raised';
     return botState.charAt(0).toUpperCase() + botState.slice(1);
@@ -511,12 +628,17 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
                       {botConfig && (
                           <div className={`bg-zinc-800 rounded-lg flex flex-col items-center justify-center relative aspect-video transition-all duration-300 shadow-lg ${botBorderClass}`}>
                             <button onClick={handleRemoveBot} className="absolute top-1 right-1 p-1 bg-black/30 rounded-full hover:bg-black/60 z-10"><XIcon className="w-3 h-3"/></button>
-                            <BotIcon className="w-10 h-10 text-blue-400" />
+                            <BotIcon className={`w-10 h-10 ${connectionStatus === 'disconnected' ? 'text-red-400' : 'text-blue-400'}`} />
                             <h2 className="text-xs mt-1 font-bold text-center px-1">{botConfig.persona.name}</h2>
                             <div className="flex items-center mt-1">
                                 <span className={`w-1.5 h-1.5 rounded-full mr-1.5 ${botStatusColor} ${botState === 'speaking' && 'animate-pulse'}`}></span>
                                 <p className="text-xs text-gray-400">{botStatusText}</p>
                             </div>
+                            {connectionStatus === 'disconnected' && (
+                                <button onClick={handleReconnect} className="mt-1 px-2 py-0.5 bg-blue-600 text-white text-[10px] rounded hover:bg-blue-500 flex items-center">
+                                    <ArrowPathIcon className="w-3 h-3 mr-1" /> Retry
+                                </button>
+                            )}
                             <div className="absolute bottom-1 left-2 bg-black/50 text-white px-2 py-0.5 rounded text-xs font-medium">Subject Expert AI</div>
                           </div>
                       )}
@@ -531,12 +653,17 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
                     {botConfig ? (
                     <div className={`bg-zinc-900 rounded-lg flex flex-col items-center justify-center relative aspect-video transition-all duration-300 ${botBorderClass}`}>
                         <button onClick={handleRemoveBot} className="absolute top-2 right-2 p-1 bg-black/30 rounded-full hover:bg-black/60 z-10"><XIcon className="w-5 h-5"/></button>
-                        <BotIcon className="w-16 h-16 text-blue-400" />
+                        <BotIcon className={`w-16 h-16 ${connectionStatus === 'disconnected' ? 'text-red-400' : 'text-blue-400'}`} />
                         <h2 className="text-xl mt-4 font-bold text-center px-4">{botConfig.persona.name}</h2>
                         <div className="flex items-center justify-center mt-2">
                             <span className={`w-2.5 h-2.5 rounded-full mr-2 ${botStatusColor} ${botState === 'speaking' && 'animate-pulse'}`}></span>
                             <p className="text-gray-400">{botStatusText}</p>
                         </div>
+                         {connectionStatus === 'disconnected' && (
+                                <button onClick={handleReconnect} className="mt-4 px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-full hover:bg-blue-500 flex items-center shadow-lg">
+                                    <ArrowPathIcon className="w-4 h-4 mr-2" /> Reconnect
+                                </button>
+                        )}
                         <div className="absolute bottom-2 left-3 bg-black/50 text-white px-2 py-1 rounded text-sm font-medium">Subject Expert AI</div>
                     </div>
                     ) : (
@@ -596,18 +723,48 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
            )}
           <div ref={conversationEndRef} />
         </div>
-        <div className="p-4 border-t border-zinc-800 bg-zinc-900">
+        <div className="p-4 border-t border-zinc-800 bg-zinc-900 space-y-2">
+            {attachment && (
+                <div className="flex items-center bg-zinc-800 p-2 rounded-lg justify-between border border-zinc-700">
+                    <div className="flex items-center space-x-2 overflow-hidden">
+                        {attachment.type === 'image' ? (
+                            <img src={attachment.preview} alt="Preview" className="w-8 h-8 object-cover rounded" />
+                        ) : (
+                             <span className="text-xl">📄</span>
+                        )}
+                        <span className="text-xs text-gray-300 truncate max-w-[150px]">{attachment.file.name}</span>
+                    </div>
+                    <button onClick={removeAttachment} className="text-gray-400 hover:text-white p-1">
+                        <XIcon className="w-4 h-4" />
+                    </button>
+                </div>
+            )}
             {botConfig ? (
                  <form onSubmit={handleSendChatMessage} className="flex items-center space-x-2">
+                 <input 
+                    type="file" 
+                    ref={fileInputRef} 
+                    onChange={handleFileSelect} 
+                    className="hidden" 
+                    accept="image/*,application/pdf,text/plain,text/markdown,application/json,text/csv,text/xml"
+                 />
+                 <button 
+                    type="button" 
+                    onClick={() => fileInputRef.current?.click()}
+                    className="p-2.5 text-zinc-400 hover:text-white bg-zinc-800 rounded-full hover:bg-zinc-700 transition-colors"
+                    title="Attach context (Image, PDF, Text)"
+                 >
+                    <PaperClipIcon className="w-5 h-5" />
+                 </button>
                  <input
                    type="text"
                    value={chatInput}
                    onChange={(e) => setChatInput(e.target.value)}
                    placeholder="Type a message..."
                    className="flex-grow p-2.5 bg-zinc-800 border border-zinc-700 rounded-full focus:ring-2 focus:ring-blue-500 focus:outline-none px-4"
-                   disabled={isChatLoading}
+                   disabled={isChatLoading || connectionStatus !== 'connected'}
                  />
-                 <button type="submit" disabled={isChatLoading || !chatInput.trim()} className="p-2.5 bg-blue-600 rounded-full hover:bg-blue-500 disabled:bg-zinc-600 disabled:cursor-not-allowed transition-colors" aria-label="Send message">
+                 <button type="submit" disabled={isChatLoading || (!chatInput.trim() && !attachment) || connectionStatus !== 'connected'} className="p-2.5 bg-blue-600 rounded-full hover:bg-blue-500 disabled:bg-zinc-600 disabled:cursor-not-allowed transition-colors" aria-label="Send message">
                    <SendIcon className="w-5 h-5 text-white"/>
                  </button>
                </form>
