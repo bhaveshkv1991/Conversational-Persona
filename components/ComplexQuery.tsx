@@ -1,10 +1,9 @@
-
 import React, { useState, useRef, useEffect } from 'react';
-import type { MeetingConfig } from '../types';
+import type { MeetingConfig, Room, RoomReport } from '../types';
+import { ArrowLeftIcon, DocumentIcon, EyeIcon } from './icons/Icons';
+import { MarkdownRenderer } from './MarkdownRenderer';
+import { ReportEditor } from './ReportEditor';
 
-// Fix: The `AIStudio` interface was defined locally in the module, which can cause type conflicts
-// if other files also augment the global `Window` object. Moving the interface declaration
-// inside `declare global` makes `AIStudio` a single, globally-scoped type, resolving the error.
 declare global {
   interface AIStudio {
     hasSelectedApiKey: () => Promise<boolean>;
@@ -16,12 +15,13 @@ declare global {
   }
 }
 
-
-const Lobby: React.FC<{ onJoin: (config: MeetingConfig) => void }> = ({ onJoin }) => {
+const Lobby: React.FC<{ onJoin: (config: MeetingConfig) => void; room?: Room; onBack?: () => void; onUpdateRoom?: (room: Room) => void }> = ({ onJoin, room, onBack, onUpdateRoom }) => {
   const [userName, setUserName] = useState('');
   const [mediaError, setMediaError] = useState('');
   const [isKeySelected, setIsKeySelected] = useState(false);
   const [isCheckingKey, setIsCheckingKey] = useState(true);
+  const [selectedReport, setSelectedReport] = useState<RoomReport | null>(null);
+  
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const isJoiningRef = useRef(false);
@@ -63,7 +63,6 @@ const Lobby: React.FC<{ onJoin: (config: MeetingConfig) => void }> = ({ onJoin }
 
     return () => {
       // Only stop tracks if we are NOT joining the meeting.
-      // If we are joining, we pass the stream to the next component.
       if (!isJoiningRef.current) {
           streamRef.current?.getTracks().forEach(track => track.stop());
       }
@@ -74,7 +73,6 @@ const Lobby: React.FC<{ onJoin: (config: MeetingConfig) => void }> = ({ onJoin }
     try {
       if (window.aistudio) {
         await window.aistudio.openSelectKey();
-        // Optimistically set to true to bypass race condition and allow user to proceed.
         setIsKeySelected(true);
       }
     } catch (e) {
@@ -87,34 +85,44 @@ const Lobby: React.FC<{ onJoin: (config: MeetingConfig) => void }> = ({ onJoin }
     if (!userName.trim()) return;
     
     isJoiningRef.current = true;
+    
+    // Resume Logic: Grab the latest transcript if available
+    let previousContext = '';
+    if (room && room.reports && room.reports.length > 0) {
+        // Use the most recent report to restore context
+        previousContext = room.reports[0].transcript;
+        console.log("Resuming session with previous context length:", previousContext.length);
+    }
+
     onJoin({
       userName,
-      stream: streamRef.current || undefined
+      stream: streamRef.current || undefined,
+      room: room,
+      previousContext
     });
+  };
+
+  const handleSaveReport = (updatedContent: string) => {
+      if (room && onUpdateRoom && selectedReport) {
+          const updatedReport = { ...selectedReport, summary: updatedContent };
+          const updatedReports = room.reports.map(r => r.id === updatedReport.id ? updatedReport : r);
+          onUpdateRoom({ ...room, reports: updatedReports });
+          setSelectedReport(updatedReport); // Update local view
+      }
   };
 
   const renderContent = () => {
     if (isCheckingKey) {
-        return (
-            <div className="text-center text-zinc-400 h-28 flex items-center justify-center">
-                <p>Checking API key status...</p>
-            </div>
-        );
+        return <p className="text-zinc-400 text-center">Checking API key status...</p>;
     }
     
     if (!isKeySelected) {
         return (
             <div className="text-center">
-                <h1 className="text-3xl md:text-4xl font-bold text-white mb-2">API Key Required</h1>
-                <p className="text-zinc-400 mt-4 mb-6">
-                    This feature requires a user-provided API key. Please select a key to continue.
-                    <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline ml-1">
-                        Learn about billing
-                    </a>.
-                </p>
+                <h1 className="text-3xl font-bold text-white mb-2">API Key Required</h1>
                 <button
                     onClick={handleSelectKey}
-                    className="w-full px-4 py-3 bg-blue-600 text-white font-semibold rounded-md hover:bg-blue-500 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-zinc-950 focus:ring-blue-500"
+                    className="w-full px-4 py-3 bg-blue-600 text-white font-semibold rounded-md hover:bg-blue-500 transition-colors mt-4"
                 >
                     Select API Key
                 </button>
@@ -123,9 +131,18 @@ const Lobby: React.FC<{ onJoin: (config: MeetingConfig) => void }> = ({ onJoin }
     }
 
     return (
-        <div className="text-center">
-            <h1 className="text-3xl md:text-4xl font-bold text-white mb-2">Ready to join?</h1>
-            <form onSubmit={handleJoin} className="space-y-4 mt-6">
+        <div className="flex flex-col h-full">
+            <div className="text-center mb-6">
+                <h1 className="text-3xl font-bold text-white mb-2">{room ? `Join ${room.name}` : 'Join Meeting'}</h1>
+                {room && <p className="text-zinc-400">Host AI: {room.persona.name}</p>}
+                {room?.reports && room.reports.length > 0 && (
+                    <div className="inline-block mt-2 px-3 py-1 bg-green-900/50 border border-green-800 text-green-400 text-xs rounded-full">
+                        Resume from last session ({new Date(room.reports[0].createdAt).toLocaleDateString()})
+                    </div>
+                )}
+            </div>
+
+            <form onSubmit={handleJoin} className="space-y-4">
                 <div>
                   <label htmlFor="name" className="sr-only">Your Name</label>
                   <input
@@ -140,9 +157,9 @@ const Lobby: React.FC<{ onJoin: (config: MeetingConfig) => void }> = ({ onJoin }
                 <button
                     type="submit"
                     disabled={!userName.trim() || !!mediaError}
-                    className="w-full px-4 py-3 bg-blue-600 text-white font-semibold rounded-md hover:bg-blue-500 disabled:bg-zinc-600 disabled:cursor-not-allowed transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-zinc-950 focus:ring-blue-500"
+                    className="w-full px-4 py-3 bg-blue-600 text-white font-semibold rounded-md hover:bg-blue-500 disabled:bg-zinc-600 transition-colors"
                 >
-                    Join now
+                    {room?.reports?.length ? 'Resume Conversation' : 'Join now'}
                 </button>
             </form>
         </div>
@@ -150,19 +167,104 @@ const Lobby: React.FC<{ onJoin: (config: MeetingConfig) => void }> = ({ onJoin }
   }
 
   return (
-    <div className="flex-grow flex items-center justify-center p-4">
-      <div className="w-full max-w-md space-y-6">
-        <div className="bg-black rounded-lg overflow-hidden aspect-video flex items-center justify-center shadow-2xl ring-1 ring-zinc-800">
-            {mediaError ? (
-              <div className="text-center text-red-400 p-4">
-                <p>{mediaError}</p>
-              </div>
-            ) : (
-              <video ref={videoRef} autoPlay muted className="w-full h-full object-cover"></video>
-            )}
-        </div>
-        {renderContent()}
+    <div className="flex-grow flex flex-col md:flex-row p-4 relative h-full overflow-hidden">
+      {onBack && (
+        <button onClick={onBack} className="absolute top-4 left-4 text-zinc-400 hover:text-white flex items-center z-10">
+            <ArrowLeftIcon className="w-5 h-5 mr-1"/> Back to Dashboard
+        </button>
+      )}
+      
+      {/* Report Editor Modal */}
+      {selectedReport && (
+          <ReportEditor 
+            initialContent={selectedReport.summary}
+            title="Session Report"
+            timestamp={selectedReport.createdAt}
+            onClose={() => setSelectedReport(null)} 
+            onSave={handleSaveReport} 
+          />
+      )}
+      
+      {/* Left Column: Media Preview */}
+      <div className="w-full md:w-1/2 flex items-center justify-center p-4">
+          <div className="w-full max-w-md space-y-6">
+            <div className="bg-black rounded-lg overflow-hidden aspect-video flex items-center justify-center shadow-2xl ring-1 ring-zinc-800 relative">
+                {mediaError ? (
+                  <div className="text-center text-red-400 p-4"><p>{mediaError}</p></div>
+                ) : (
+                  <video ref={videoRef} autoPlay muted className="w-full h-full object-cover"></video>
+                )}
+                 <div className="absolute bottom-4 left-4 bg-black/60 px-3 py-1 rounded text-white text-sm">
+                    Camera Check
+                 </div>
+            </div>
+            {renderContent()}
+          </div>
       </div>
+
+      {/* Right Column: Room Details & History */}
+      {room && (
+          <div className="w-full md:w-1/2 bg-zinc-900/50 border-l border-zinc-800 p-6 overflow-y-auto">
+             <div className="max-w-xl mx-auto space-y-8">
+                 
+                 {/* Resources Section */}
+                 <div>
+                     <h3 className="text-lg font-semibold text-white mb-3 flex items-center">
+                         <DocumentIcon className="w-5 h-5 mr-2 text-blue-400"/> Room Resources
+                     </h3>
+                     {room.resources.length === 0 ? (
+                         <p className="text-sm text-zinc-500 italic">No resources uploaded.</p>
+                     ) : (
+                         <div className="grid grid-cols-1 gap-2">
+                             {room.resources.map(res => (
+                                 <div key={res.id} className="flex items-center bg-zinc-800 p-2 rounded border border-zinc-700">
+                                     <DocumentIcon className="w-4 h-4 text-zinc-400 mr-2"/>
+                                     <div className="flex-grow min-w-0">
+                                         <p className="text-sm text-gray-200 truncate">{res.name}</p>
+                                     </div>
+                                     <span className="text-xs text-zinc-500 uppercase ml-2">{res.type.split('/')[1]}</span>
+                                 </div>
+                             ))}
+                         </div>
+                     )}
+                 </div>
+
+                 {/* Reports Section */}
+                 <div>
+                     <h3 className="text-lg font-semibold text-white mb-3 flex items-center">
+                         <DocumentIcon className="w-5 h-5 mr-2 text-green-400"/> Session History
+                     </h3>
+                      {(!room.reports || room.reports.length === 0) ? (
+                         <p className="text-sm text-zinc-500 italic">No past sessions recorded.</p>
+                     ) : (
+                         <div className="space-y-4">
+                             {room.reports.map((report, idx) => (
+                                 <div key={report.id} className="bg-zinc-800 border border-zinc-700 rounded-lg p-4 group hover:border-blue-500/50 transition-colors">
+                                     <div className="flex justify-between items-center mb-2">
+                                         <h4 className="font-medium text-white">Session {room.reports.length - idx}</h4>
+                                         <span className="text-xs text-zinc-500">{new Date(report.createdAt).toLocaleString()}</span>
+                                     </div>
+                                     <div className="max-h-32 overflow-hidden relative mb-4">
+                                         <div className="text-xs text-zinc-400 whitespace-pre-line">
+                                            <MarkdownRenderer content={report.summary.slice(0, 300) + '...'} />
+                                         </div>
+                                         <div className="absolute bottom-0 left-0 w-full h-8 bg-gradient-to-t from-zinc-800 to-transparent"></div>
+                                     </div>
+                                     <button 
+                                        onClick={() => setSelectedReport(report)}
+                                        className="w-full py-2.5 bg-zinc-700 hover:bg-blue-600 text-sm text-white rounded font-medium flex items-center justify-center transition-all shadow-lg"
+                                     >
+                                         <EyeIcon className="w-4 h-4 mr-2" /> View & Download Report
+                                     </button>
+                                 </div>
+                             ))}
+                         </div>
+                     )}
+                 </div>
+
+             </div>
+          </div>
+      )}
     </div>
   );
 };

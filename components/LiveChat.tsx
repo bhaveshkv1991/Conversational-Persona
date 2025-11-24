@@ -1,9 +1,9 @@
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { GoogleGenAI, Modality, LiveSession, Chat, type LiveServerMessage, type Blob } from '@google/genai';
+import { GoogleGenAI, Modality, Chat, type LiveServerMessage, type Blob as GenAIBlob } from '@google/genai';
 import { decode, encode, decodeAudioData } from '../services/audioUtils';
-import { MicIcon, MicSlashIcon, PhoneIcon, BotIcon, PlusIcon, XIcon, SendIcon, ScreenShareIcon, PaperClipIcon, ArrowPathIcon } from './icons/Icons';
-import type { MeetingConfig, ConversationEntry, BotState, Persona, ChatMessage } from '../types';
+import { MicIcon, MicSlashIcon, PhoneIcon, BotIcon, PlusIcon, XIcon, SendIcon, ScreenShareIcon, PaperClipIcon, ArrowPathIcon, DownloadIcon } from './icons/Icons';
+import type { MeetingConfig, ConversationEntry, BotState, Persona, ChatMessage, RoomResource, RoomReport } from '../types';
 import { PERSONAS } from '../constants';
 import { MarkdownRenderer } from './MarkdownRenderer';
 
@@ -19,7 +19,7 @@ const blobToBase64 = (blob: globalThis.Blob): Promise<string> => {
     });
 };
 
-function createBlob(data: Float32Array): Blob {
+function createBlob(data: Float32Array): GenAIBlob {
   const l = data.length;
   const int16 = new Int16Array(l);
   for (let i = 0; i < l; i++) {
@@ -91,8 +91,10 @@ const AddBotModal: React.FC<{ onAdd: (config: { persona: Persona; systemPrompt: 
 };
 
 
-const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({ config, onLeave }) => {
-  const [botConfig, setBotConfig] = useState<{ persona: Persona; systemPrompt: string } | null>(null);
+const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomReport) => void }> = ({ config, onLeave }) => {
+  const [botConfig, setBotConfig] = useState<{ persona: Persona; systemPrompt: string } | null>(
+      config.room ? { persona: config.room.persona, systemPrompt: config.room.persona.systemPrompt } : null
+  );
   const [showAddBotModal, setShowAddBotModal] = useState(false);
   const [botState, setBotState] = useState<BotState>('listening');
   const [connectionStatus, setConnectionStatus] = useState<'idle' | 'connecting' | 'connected' | 'disconnected'>('idle');
@@ -111,7 +113,7 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
   const frameIntervalRef = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const sessionPromiseRef = useRef<Promise<LiveSession> | null>(null);
+  const sessionPromiseRef = useRef<Promise<any> | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const mediaStreamSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
@@ -129,7 +131,7 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
     conversationEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [conversationHistory]);
 
-  // Ensure videoRef always has the stream when layout changes (e.g., screen share toggle)
+  // Ensure videoRef always has the stream when layout changes
   useEffect(() => {
       if (videoRef.current && userStreamRef.current) {
           videoRef.current.srcObject = userStreamRef.current;
@@ -145,32 +147,39 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
 
   const disconnectSession = useCallback(async (isCleanup: boolean = false) => {
     stopFrameSending();
+    
+    // Stop all playing sources immediately
     if (sourcesRef.current) {
         for (const source of sourcesRef.current.values()) {
-            source.stop();
+            try { source.stop(); } catch (e) {}
         }
         sourcesRef.current.clear();
     }
     nextStartTimeRef.current = 0;
+
     if (sessionPromiseRef.current) {
       try {
         const session = await sessionPromiseRef.current;
         session.close();
-      } catch (e) { console.error('Error closing session:', e); }
+      } catch (e) { 
+        console.warn('Error closing session:', e); 
+      }
       sessionPromiseRef.current = null;
     }
+
     if (scriptProcessorRef.current) {
         try { scriptProcessorRef.current.disconnect(); } catch(e) {}
     }
     if (mediaStreamSourceRef.current) {
         try { mediaStreamSourceRef.current.disconnect(); } catch(e) {}
     }
-    if (audioContextRef.current?.state !== 'closed') {
-        try { await audioContextRef.current?.close(); } catch(e) {}
+    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+        try { await audioContextRef.current.close(); } catch(e) {}
     }
-    if (outputAudioContextRef.current?.state !== 'closed') {
-        try { await outputAudioContextRef.current?.close(); } catch(e) {}
+    if (outputAudioContextRef.current && outputAudioContextRef.current.state !== 'closed') {
+        try { await outputAudioContextRef.current.close(); } catch(e) {}
     }
+    
     chatRef.current = null;
 
     if (isCleanup) {
@@ -179,24 +188,7 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
   }, [stopFrameSending]);
   
   const handleAddBot = (botJoinConfig: { persona: Persona, systemPrompt: string }) => {
-    const apiKey = process.env.API_KEY;
-    if (!apiKey) {
-        alert("API Key is missing. Please ensure a valid API Key is provided in the code or environment variables.");
-        return;
-    }
-    
     setBotConfig(botJoinConfig);
-    try {
-        const ai = new GoogleGenAI({ apiKey });
-        chatRef.current = ai.chats.create({
-          model: 'gemini-2.5-flash',
-          config: { systemInstruction: botJoinConfig.systemPrompt },
-        });
-        setShowAddBotModal(false);
-    } catch (e) {
-        console.error("Failed to initialize chat client:", e);
-        alert("Failed to initialize AI client. Check console for details.");
-    }
   };
   
   const handleRemoveBot = useCallback(() => {
@@ -208,14 +200,13 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
   }, [disconnectSession]);
 
   const startFrameSending = useCallback(() => {
-    stopFrameSending(); // Ensure no multiple intervals running
+    stopFrameSending(); 
     frameIntervalRef.current = window.setInterval(() => {
       if (!screenVideoRef.current || screenVideoRef.current.paused || screenVideoRef.current.ended || !sessionPromiseRef.current) return;
       
       const video = screenVideoRef.current;
       const canvas = canvasRef.current;
       
-      // Scale down large screens to avoid websocket payload limits (disconnects)
       const MAX_WIDTH = 1024;
       const scale = Math.min(1, MAX_WIDTH / video.videoWidth);
       
@@ -240,7 +231,7 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
               }
           }
       }, 'image/jpeg', 0.8);
-    }, 1000); // 1 frame per second
+    }, 1000); 
   }, [stopFrameSending]);
 
   const startConversation = useCallback(async (stream: MediaStream, systemPrompt: string, previousContext: string = '') => {
@@ -250,8 +241,15 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
     if (sessionPromiseRef.current) await disconnectSession();
     
     setConnectionStatus('connecting');
+    setBotState('listening');
 
     const ai = new GoogleGenAI({ apiKey });
+
+    // Initialize Chat Client for Text Interaction
+    chatRef.current = ai.chats.create({
+        model: 'gemini-2.5-flash',
+        config: { systemInstruction: systemPrompt },
+    });
     
     const conversationalStylePrompt = `Speak just like a real person—warm, natural, and clear. Use simple language and avoid technical jargon unless the user uses it first. Be concise; don’t stretch the discussion or add unnecessary details. Stay focused on what the user asks. When needed, ask short clarifying questions. Keep the conversation smooth, friendly, and human-like.`;
 
@@ -260,98 +258,177 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
     // Inject user name into the context
     const userContext = `The user you are speaking with is named ${config.userName}. Address them by name naturally in the conversation, but do not overdo it.`;
 
-    let systemInstruction = `${userContext} ${systemPrompt} ${conversationalStylePrompt} ${meetingBehaviorPrompt}`;
+    // --- CONTEXT INJECTION FROM ROOM RESOURCES ---
+    let resourceContext = "";
+    const imageResources: RoomResource[] = [];
+    
+    if (config.room?.resources) {
+        const textResources = config.room.resources.filter(r => r.type.includes('text') || r.type.includes('json') || r.type.includes('markdown'));
+        config.room.resources.forEach(r => {
+             if (r.type.startsWith('image/')) {
+                 imageResources.push(r);
+             }
+        });
 
-    if (previousContext) {
-        systemInstruction += `\n\nIMPORTANT: The connection was interrupted. Below is the transcript of the conversation so far. Resume the conversation naturally from where it left off. Do not simply repeat the last message.\n\n[PREVIOUS_TRANSCRIPT_START]\n${previousContext}\n[PREVIOUS_TRANSCRIPT_END]`;
+        if (textResources.length > 0) {
+            resourceContext += "\n\n[ATTACHED DOCUMENTS]\n";
+            textResources.forEach(res => {
+                // Decode base64 content to text
+                try {
+                    const textContent = atob(res.content);
+                    resourceContext += `--- Document: ${res.name} ---\n${textContent}\n\n`;
+                } catch (e) { console.warn("Failed to decode text resource", res.name); }
+            });
+            resourceContext += "[END ATTACHED DOCUMENTS]\nUse the above documents as primary context for your answers.";
+        }
+    }
+
+    let systemInstruction = `${userContext} ${systemPrompt} ${resourceContext} ${conversationalStylePrompt} ${meetingBehaviorPrompt}`;
+
+    // Combine config previous context (from Lobby) and reconnect context (from reconnection)
+    const combinedContext = (config.previousContext || '') + (previousContext ? `\n\n[RECENT_DISCONNECTION_CONTEXT]\n${previousContext}` : '');
+
+    if (combinedContext) {
+        systemInstruction += `\n\n[SYSTEM UPDATE] The conversation is resuming. Below is the transcript of the previous session. Resume the conversation naturally from where it left off using this context. Do NOT repeat the last message unless asked.\n\n[PREVIOUS_TRANSCRIPT_START]\n${combinedContext}\n[PREVIOUS_TRANSCRIPT_END]`;
     }
 
     audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
     outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
     
-    sessionPromiseRef.current = ai.live.connect({
-      model: 'gemini-2.5-flash-native-audio-preview-09-2025',
-      config: { responseModalities: [Modality.AUDIO], inputAudioTranscription: {}, outputAudioTranscription: {}, systemInstruction },
-      callbacks: {
-        onopen: () => {
-          console.log('Connection opened.');
-          setConnectionStatus('connected');
-          if (!audioContextRef.current || audioContextRef.current.state === 'closed') return;
-          
-          // Create media stream source from the stream
-          const source = audioContextRef.current.createMediaStreamSource(stream);
-          mediaStreamSourceRef.current = source;
-          
-          const scriptProcessor = audioContextRef.current.createScriptProcessor(4096, 1, 1);
-          scriptProcessorRef.current = scriptProcessor;
-          
-          scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
-            const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
-            const pcmBlob: Blob = createBlob(inputData);
-            sessionPromiseRef.current?.then(session => session.sendRealtimeInput({ media: pcmBlob }));
-          };
-          
-          source.connect(scriptProcessor);
-          scriptProcessor.connect(audioContextRef.current.destination); 
-        },
-        onmessage: async (message: LiveServerMessage) => {
-          if (message.serverContent?.outputTranscription) {
-              setBotState('speaking');
-              currentOutputTranscriptionRef.current += message.serverContent.outputTranscription.text;
-          } else if (message.serverContent?.inputTranscription) {
-            currentInputTranscriptionRef.current += message.serverContent.inputTranscription.text;
-          }
-
-          if (message.serverContent?.turnComplete) {
-            const fullInput = currentInputTranscriptionRef.current.trim();
-            const fullOutput = currentOutputTranscriptionRef.current.trim();
-            if (fullInput) setConversationHistory(prev => [...prev, { type: 'transcription', speaker: 'user', text: `You (Spoken): ${fullInput}` }]);
-            if (fullOutput) setConversationHistory(prev => [...prev, { type: 'transcription', speaker: 'model', text: `AI (Spoken): ${fullOutput}` }]);
-            currentInputTranscriptionRef.current = '';
-            currentOutputTranscriptionRef.current = '';
-            setBotState('listening');
-          }
-
-          if (message.serverContent?.interrupted) {
-            for (const source of sourcesRef.current.values()) {
-              source.stop();
+    try {
+        const sessionPromise = ai.live.connect({
+          model: 'gemini-2.5-flash-native-audio-preview-09-2025',
+          config: { 
+            responseModalities: [Modality.AUDIO], 
+            inputAudioTranscription: {}, 
+            outputAudioTranscription: {}, 
+            systemInstruction,
+            speechConfig: {
+                voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } }
             }
-            sourcesRef.current.clear();
-            nextStartTimeRef.current = 0;
-          }
+          },
+          callbacks: {
+            onopen: async () => {
+              console.log('Connection opened.');
+              setConnectionStatus('connected');
+              
+              // --- SEND IMAGE CONTEXT ---
+              if (imageResources.length > 0) {
+                  const session = await sessionPromise;
+                  for (const img of imageResources) {
+                      try {
+                          await session.sendRealtimeInput({
+                              media: { mimeType: img.type, data: img.content }
+                          });
+                          console.log("Sent initial image context:", img.name);
+                          await new Promise(r => setTimeout(r, 200)); 
+                      } catch (e) {
+                          console.error("Failed to send image context", e);
+                      }
+                  }
+              }
 
-          const base64Audio = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
-          if (base64Audio && outputAudioContextRef.current) {
-            const audioCtx = outputAudioContextRef.current;
-            nextStartTimeRef.current = Math.max(nextStartTimeRef.current, audioCtx.currentTime);
-            const audioBuffer = await decodeAudioData(decode(base64Audio), audioCtx, 24000, 1);
-            const source = audioCtx.createBufferSource();
-            source.buffer = audioBuffer;
-            source.connect(audioCtx.destination);
-            source.addEventListener('ended', () => {
-              sourcesRef.current.delete(source);
-            });
-            source.start(nextStartTimeRef.current);
-            nextStartTimeRef.current += audioBuffer.duration;
-            sourcesRef.current.add(source);
-          }
-        },
-        onerror: (e: ErrorEvent) => { 
-          console.error('Connection error:', e);
-          setConnectionStatus('disconnected');
-        },
-        onclose: (e: CloseEvent) => { 
-            console.log('Connection closed.'); 
-            setConnectionStatus(prev => prev === 'connected' ? 'disconnected' : prev);
-        },
-      },
-    });
-  }, [disconnectSession, config.userName]);
+              if (!audioContextRef.current || audioContextRef.current.state === 'closed') return;
+              
+              const source = audioContextRef.current.createMediaStreamSource(stream);
+              mediaStreamSourceRef.current = source;
+              
+              const scriptProcessor = audioContextRef.current.createScriptProcessor(4096, 1, 1);
+              scriptProcessorRef.current = scriptProcessor;
+              
+              scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
+                const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
+                const pcmBlob: GenAIBlob = createBlob(inputData);
+                sessionPromiseRef.current?.then(session => {
+                    try {
+                        session.sendRealtimeInput({ media: pcmBlob });
+                    } catch (e) {
+                        console.warn("Failed to send audio chunk", e);
+                    }
+                });
+              };
+              
+              source.connect(scriptProcessor);
+              scriptProcessor.connect(audioContextRef.current.destination); 
+            },
+            onmessage: async (message: LiveServerMessage) => {
+              if (message.serverContent?.outputTranscription) {
+                  setBotState('speaking');
+                  currentOutputTranscriptionRef.current += message.serverContent.outputTranscription.text;
+              } else if (message.serverContent?.inputTranscription) {
+                currentInputTranscriptionRef.current += message.serverContent.inputTranscription.text;
+              }
+
+              if (message.serverContent?.turnComplete) {
+                const fullInput = currentInputTranscriptionRef.current.trim();
+                const fullOutput = currentOutputTranscriptionRef.current.trim();
+                if (fullInput) setConversationHistory(prev => [...prev, { type: 'transcription', speaker: 'user', text: `You (Spoken): ${fullInput}` }]);
+                if (fullOutput) setConversationHistory(prev => [...prev, { type: 'transcription', speaker: 'model', text: `AI (Spoken): ${fullOutput}` }]);
+                currentInputTranscriptionRef.current = '';
+                currentOutputTranscriptionRef.current = '';
+                setBotState('listening');
+              }
+
+              if (message.serverContent?.interrupted) {
+                for (const source of sourcesRef.current.values()) {
+                  source.stop();
+                }
+                sourcesRef.current.clear();
+                nextStartTimeRef.current = 0;
+              }
+
+              const base64Audio = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
+              if (base64Audio && outputAudioContextRef.current) {
+                const audioCtx = outputAudioContextRef.current;
+                nextStartTimeRef.current = Math.max(nextStartTimeRef.current, audioCtx.currentTime);
+                const audioBuffer = await decodeAudioData(decode(base64Audio), audioCtx, 24000, 1);
+                const source = audioCtx.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioCtx.destination);
+                source.addEventListener('ended', () => {
+                  sourcesRef.current.delete(source);
+                });
+                source.start(nextStartTimeRef.current);
+                nextStartTimeRef.current += audioBuffer.duration;
+                sourcesRef.current.add(source);
+              }
+            },
+            onerror: (e: ErrorEvent) => { 
+              console.error('Connection error:', e);
+              setConnectionStatus('disconnected');
+            },
+            onclose: (e: CloseEvent) => { 
+                console.log('Connection closed.', e); 
+                setConnectionStatus(prev => prev === 'connected' ? 'disconnected' : prev);
+            },
+          },
+        });
+        
+        sessionPromiseRef.current = sessionPromise;
+        
+        sessionPromise.catch(err => {
+            console.error("Session connection failed:", err);
+            setConnectionStatus('disconnected');
+        });
+
+    } catch (err) {
+        console.error("Failed to initiate session:", err);
+        setConnectionStatus('disconnected');
+    }
+
+  }, [disconnectSession, config.userName, config.room, config.previousContext]);
 
   const handleReconnect = useCallback(() => {
-      if (!botConfig || !userStreamRef.current) return;
+      const activeStream = userStreamRef.current && userStreamRef.current.active ? userStreamRef.current : config.stream;
 
-      // Format recent history to provide context
+      if (!botConfig || !activeStream) {
+          console.error("Cannot reconnect: Missing configuration or active media stream.");
+          return;
+      }
+      
+      console.log("Attempting to reconnect...");
+      setConnectionStatus('connecting');
+
       const historyContext = conversationHistory.slice(-30).map(entry => {
           if (entry.type === 'transcription') {
               return `${entry.speaker === 'user' ? 'User' : 'AI'}: ${entry.text}`;
@@ -360,8 +437,8 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
           }
       }).join('\n');
 
-      startConversation(userStreamRef.current, botConfig.systemPrompt, historyContext);
-  }, [botConfig, conversationHistory, startConversation]);
+      startConversation(activeStream, botConfig.systemPrompt, historyContext);
+  }, [botConfig, conversationHistory, startConversation, config.stream]);
   
   useEffect(() => {
     if (isSharingScreen && botConfig && connectionStatus === 'connected') {
@@ -417,7 +494,25 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
       }
   }, [botConfig, startConversation, connectionStatus]);
 
+  const generateReport = (): RoomReport => {
+      const timestamp = new Date().toLocaleString();
+      const content = conversationHistory.map(entry => {
+          const role = entry.type === 'transcription' ? (entry.speaker === 'user' ? 'User (Voice)' : 'AI (Voice)') : (entry.role === 'user' ? 'User (Chat)' : 'AI (Chat)');
+          return `**${role}:**\n${entry.text}\n`;
+      }).join('\n');
+      
+      const summaryMarkdown = `# Meeting Summary - ${botConfig?.persona.name || 'AI Assistant'}\nDate: ${timestamp}\nParticipant: ${config.userName}\n\n## Transcript\n\n${content}`;
+      
+      return {
+          id: crypto.randomUUID(),
+          createdAt: Date.now(),
+          summary: summaryMarkdown,
+          transcript: content
+      };
+  };
+
   const handleLeaveCall = useCallback(() => {
+    const report = generateReport();
     disconnectSession(true);
     if (config.stream) {
         config.stream.getTracks().forEach(t => t.stop());
@@ -425,8 +520,21 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
     if (userStreamRef.current && userStreamRef.current !== config.stream) {
         userStreamRef.current.getTracks().forEach(t => t.stop());
     }
-    onLeave();
-  }, [disconnectSession, config.stream, onLeave]);
+    onLeave(report);
+  }, [disconnectSession, config.stream, onLeave, generateReport]);
+
+  const downloadSummary = () => {
+    const report = generateReport();
+    const blob = new Blob([report.summary], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `meeting-summary-${new Date().toISOString().replace(/[:.]/g, '-')}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -445,10 +553,16 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
         preview = '📕 ' + file.name;
       } else {
           alert("Unsupported file type. Please upload images, text files, JSON, CSV, or PDFs.");
+          // Clear input if invalid
+          if (fileInputRef.current) fileInputRef.current.value = '';
           return;
       }
 
       setAttachment({ file, type, preview });
+      // Reset file input is handled after sending or removing, but clearing it here ensures change event fires if selecting same file again after error
+      // However, we need to keep it if valid to allow sending. 
+      // The issue usually is onChange not firing for same file.
+      // We'll clear it in handleSendChatMessage or removeAttachment.
     }
   };
 
@@ -489,7 +603,6 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
       if (attachedFile) {
         const base64Data = await blobToBase64(attachedFile.file);
         
-        // 1. Add to Chat Context
         messageParts.push({
             inlineData: {
                 mimeType: attachedFile.file.type,
@@ -497,20 +610,16 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
             }
         });
 
-        // 2. Send to Live Session (Voice Bot) if applicable and supported
-        if (sessionPromiseRef.current && connectionStatus === 'connected') {
+        // Send visual context to Live Session as well if it's an image
+        if (sessionPromiseRef.current && connectionStatus === 'connected' && attachedFile.type === 'image') {
             const session = await sessionPromiseRef.current;
             try {
-                 // We send the visual/document context to the live session so the voice bot can "see" it.
-                 if (attachedFile.type === 'image' || attachedFile.type === 'pdf' || attachedFile.type === 'text') {
-                     await session.sendRealtimeInput({ 
-                        media: { 
-                            mimeType: attachedFile.file.type, 
-                            data: base64Data 
-                        } 
-                     });
-                     console.log(`Sent ${attachedFile.type} attachment to Live Session context`);
-                 }
+                 await session.sendRealtimeInput({ 
+                    media: { 
+                        mimeType: attachedFile.file.type, 
+                        data: base64Data 
+                    } 
+                 });
             } catch (err) {
                 console.error("Failed to send attachment to Live Session:", err);
             }
@@ -609,6 +718,7 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
   const botStatusText = getBotStatusText();
 
   const participantCount = 1 + (botConfig ? 1 : 0);
+  const lastEntry = conversationHistory[conversationHistory.length - 1];
 
   return (
     <div className="flex h-full w-full bg-zinc-950 relative overflow-hidden">
@@ -694,8 +804,11 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
       </div>
 
       <div className="w-full max-w-sm flex-shrink-0 bg-zinc-900 border-l border-zinc-800 flex flex-col">
-        <div className="p-4 border-b border-zinc-800">
-            <h2 className="text-lg font-semibold text-white">Meeting Chat & Transcript</h2>
+        <div className="p-4 border-b border-zinc-800 flex justify-between items-center">
+            <h2 className="text-lg font-semibold text-white">Meeting Chat</h2>
+            <button onClick={downloadSummary} className="text-zinc-400 hover:text-white" title="Download Summary">
+                <DownloadIcon className="w-5 h-5" />
+            </button>
         </div>
         <div className="flex-grow p-4 overflow-y-auto space-y-4">
             {conversationHistory.map((entry, index) => {
@@ -714,7 +827,7 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: () => void }> = ({
                     </div>
                 );
             })}
-             {isChatLoading && conversationHistory[conversationHistory.length - 1]?.type === 'chat' && conversationHistory[conversationHistory.length-1].role !== 'model' && (
+             {isChatLoading && lastEntry?.type === 'chat' && lastEntry.role !== 'model' && (
              <div className="flex justify-start">
                 <div className="max-w-md p-3 rounded-2xl bg-zinc-700 text-white rounded-bl-lg">
                   <div className="text-sm">...</div>
