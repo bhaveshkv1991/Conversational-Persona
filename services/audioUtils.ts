@@ -18,6 +18,15 @@ export function decode(base64: string): Uint8Array {
   return bytes;
 }
 
+export function base64ToUtf8(base64: string): string {
+  const binaryString = atob(base64);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return new TextDecoder().decode(bytes);
+}
+
 export async function decodeAudioData(
   data: Uint8Array,
   ctx: AudioContext,

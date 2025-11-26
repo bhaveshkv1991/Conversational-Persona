@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import type { Persona, Room, RoomResource } from '../types';
 import { PERSONAS } from '../constants';
-import { PlusIcon, TrashIcon, DocumentIcon, CopyIcon, ArrowPathIcon, LinkIcon, VideoCameraIcon } from './icons/Icons';
+import { PlusIcon, TrashIcon, DocumentIcon, CopyIcon, ArrowPathIcon, LinkIcon, VideoCameraIcon, ShareIcon } from './icons/Icons';
 
 interface DashboardProps {
   onJoinRoom: (roomId: string) => void;
@@ -135,9 +135,10 @@ const Dashboard: React.FC<DashboardProps> = ({ onJoinRoom }) => {
 
   const copyLink = (roomId: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    const url = `${window.location.origin}?room=${roomId}`;
+    // Use origin + pathname to ensure we stay on the same app path (e.g. if hosted in subdir or on IDX)
+    const url = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
     navigator.clipboard.writeText(url);
-    alert("Link copied! Note: This link only works on this device.");
+    alert("Lobby link copied to clipboard!");
   };
 
   const getResourceIcon = (type: string) => {
@@ -279,13 +280,6 @@ const Dashboard: React.FC<DashboardProps> = ({ onJoinRoom }) => {
                 <h3 className="text-xl font-bold text-white truncate pr-8">{room.name}</h3>
                 <div className="flex space-x-1 absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity">
                     <button
-                        onClick={(e) => copyLink(room.id, e)}
-                        className="p-1.5 bg-zinc-800 rounded-md text-zinc-400 hover:text-white hover:bg-zinc-700"
-                        title="Copy local link"
-                    >
-                        <CopyIcon className="w-4 h-4" />
-                    </button>
-                    <button
                         onClick={(e) => deleteRoom(room.id, e)}
                         className="p-1.5 bg-zinc-800 rounded-md text-zinc-400 hover:text-red-400 hover:bg-zinc-700"
                         title="Delete Lobby"
@@ -314,7 +308,17 @@ const Dashboard: React.FC<DashboardProps> = ({ onJoinRoom }) => {
               
               <div className="mt-4 pt-4 border-t border-zinc-800 flex justify-between items-center">
                   <span className="text-xs text-zinc-600">Created {new Date(room.createdAt).toLocaleDateString()}</span>
-                  <span className="text-blue-400 text-sm font-medium group-hover:underline">Enter Lobby &rarr;</span>
+                  
+                  <div className="flex items-center space-x-2">
+                      <button
+                        onClick={(e) => copyLink(room.id, e)}
+                        className="text-zinc-400 hover:text-white px-2 py-1 rounded text-xs font-medium flex items-center transition-colors hover:bg-zinc-800"
+                        title="Share Lobby Link"
+                      >
+                        <ShareIcon className="w-3.5 h-3.5 mr-1.5" /> Share
+                      </button>
+                      <span className="text-blue-400 text-sm font-medium group-hover:underline pl-2 border-l border-zinc-800">Enter &rarr;</span>
+                  </div>
               </div>
             </div>
           ))

@@ -34,6 +34,7 @@ export interface MeetingConfig {
   stream?: MediaStream;
   room?: Room; // Context from the dashboard
   previousContext?: string; // Text from previous sessions to restore context
+  connectToHostId?: string; // For guests joining a call
 }
 
 export interface Transcription {
@@ -51,3 +52,8 @@ export interface ChatMessage {
 }
 
 export type ConversationEntry = Transcription | ChatMessage;
+
+export interface RemotePeer {
+  id: string;
+  stream: MediaStream;
+}

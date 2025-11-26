@@ -1,9 +1,10 @@
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { GoogleGenAI, Modality, Chat, type LiveServerMessage, type Blob as GenAIBlob, Type, type FunctionDeclaration } from '@google/genai';
-import { decode, encode, decodeAudioData } from '../services/audioUtils';
-import { MicIcon, MicSlashIcon, PhoneIcon, BotIcon, PlusIcon, XIcon, SendIcon, ScreenShareIcon, ArrowPathIcon, DownloadIcon, DocumentIcon } from './icons/Icons';
-import type { MeetingConfig, ConversationEntry, BotState, Persona, RoomResource, RoomReport } from '../types';
+import Peer from 'peerjs';
+import { decode, encode, decodeAudioData, base64ToUtf8 } from '../services/audioUtils';
+import { MicIcon, MicSlashIcon, PhoneIcon, BotIcon, PlusIcon, XIcon, SendIcon, ScreenShareIcon, ArrowPathIcon, DownloadIcon, DocumentIcon, LinkIcon, CopyIcon, EyeIcon } from './icons/Icons';
+import type { MeetingConfig, ConversationEntry, BotState, Persona, RoomResource, RoomReport, RemotePeer } from '../types';
 import { PERSONAS } from '../constants';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { ReportEditor } from './ReportEditor';
@@ -47,6 +48,34 @@ const createReportTool: FunctionDeclaration = {
     },
     required: ['title', 'content'],
   },
+};
+
+// --- VIDEO TILE COMPONENT (Prevents Flickering) ---
+const VideoTile: React.FC<{ stream: MediaStream | null; name: string; isLocal?: boolean; isMirror?: boolean }> = ({ stream, name, isLocal, isMirror }) => {
+    const videoRef = useRef<HTMLVideoElement>(null);
+
+    useEffect(() => {
+        if (videoRef.current && stream) {
+            videoRef.current.srcObject = stream;
+        } else if (videoRef.current) {
+            videoRef.current.srcObject = null;
+        }
+    }, [stream]);
+
+    return (
+        <div className="bg-zinc-900 rounded-xl overflow-hidden relative border border-zinc-800 shadow-lg w-full h-full">
+            <video 
+                ref={videoRef} 
+                autoPlay 
+                muted={isLocal} 
+                playsInline
+                className={`w-full h-full object-cover ${isMirror ? 'scale-x-[-1]' : ''}`} 
+            />
+            <div className="absolute bottom-2 left-2 bg-black/60 px-2 py-1 rounded text-white text-xs font-medium truncate max-w-[150px]">
+                {name}
+            </div>
+        </div>
+    );
 };
 
 const AddBotModal: React.FC<{ onAdd: (config: { persona: Persona; systemPrompt: string }) => void; onCancel: () => void; }> = ({ onAdd, onCancel }) => {
@@ -127,9 +156,18 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
   const [attachment, setAttachment] = useState<{ file: File; type: 'image' | 'text' | 'pdf' | 'unknown'; preview: string } | null>(null);
   const [viewingReport, setViewingReport] = useState<string | null>(null);
   
+  // Transcript settings - Default to FALSE to optimize performance
+  const [isTranscriptEnabled, setIsTranscriptEnabled] = useState(false);
+  const isTranscriptEnabledRef = useRef(false);
+
   // Real-time transcription state
   const [realtimeInput, setRealtimeInput] = useState('');
   const [smoothOutput, setSmoothOutput] = useState('');
+
+  // Multi-User State
+  const [myPeerId, setMyPeerId] = useState<string | null>(null);
+  const [remotePeers, setRemotePeers] = useState<RemotePeer[]>([]);
+  const [isCopied, setIsCopied] = useState(false);
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const userStreamRef = useRef<MediaStream | null>(null);
@@ -147,6 +185,10 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
   const chatRef = useRef<Chat | null>(null);
   const conversationEndRef = useRef<HTMLDivElement>(null);
   const conversationHistoryRef = useRef<ConversationEntry[]>([]);
+  
+  // PeerJS Refs
+  const peerRef = useRef<Peer | null>(null);
+  const peerConnectionsRef = useRef<Map<string, any>>(new Map());
 
   const currentInputTranscriptionRef = useRef('');
   const currentOutputTranscriptionRef = useRef('');
@@ -161,9 +203,23 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
   const isIntentionalDisconnectRef = useRef(false);
   const reconnectTimeoutRef = useRef<number | null>(null);
 
+  useEffect(() => {
+      isTranscriptEnabledRef.current = isTranscriptEnabled;
+      // Clear visible realtime buffers if disabled to clean up UI
+      if (!isTranscriptEnabled) {
+          setRealtimeInput('');
+          setSmoothOutput('');
+      }
+  }, [isTranscriptEnabled]);
+
   // --- TYPEWRITER EFFECT FOR AI RESPONSE ---
   useEffect(() => {
     const interval = setInterval(() => {
+        // Optimization: Only run smooth output logic if transcript is actually visible
+        if (!isTranscriptEnabledRef.current) {
+            return;
+        }
+
         setSmoothOutput(current => {
             const target = targetOutputRef.current;
             if (current === target) return current;
@@ -177,12 +233,16 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
         });
     }, 50); 
     return () => clearInterval(interval);
-  }, []);
+  }, []); // Intentionally empty deps to run continuously
 
   useEffect(() => {
     conversationHistoryRef.current = conversationHistory;
-    conversationEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [conversationHistory, realtimeInput, smoothOutput]);
+    if (conversationEndRef.current) {
+        // Use auto behavior if we are streaming text to prevent "vibrating" scroll
+        const behavior = smoothOutput ? 'auto' : 'smooth';
+        conversationEndRef.current.scrollIntoView({ behavior, block: 'end' });
+    }
+  }, [conversationHistory.length, realtimeInput !== '', smoothOutput !== '']);
 
   // Ensure videoRef always has the stream when layout changes
   useEffect(() => {
@@ -190,6 +250,84 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
           videoRef.current.srcObject = userStreamRef.current;
       }
   }, [isSharingScreen]);
+
+  // --- PEERJS INITIALIZATION ---
+  useEffect(() => {
+      const initPeer = async () => {
+          if (!userStreamRef.current) return;
+          
+          try {
+              const peer = new Peer();
+              peerRef.current = peer;
+
+              peer.on('open', (id) => {
+                  console.log('My Peer ID:', id);
+                  setMyPeerId(id);
+
+                  // If we are a guest, call the host
+                  if (config.connectToHostId && userStreamRef.current) {
+                      console.log('Calling Host:', config.connectToHostId);
+                      const call = peer.call(config.connectToHostId, userStreamRef.current);
+                      handleCall(call);
+                  }
+              });
+
+              peer.on('call', (call) => {
+                  console.log('Incoming call from:', call.peer);
+                  if (userStreamRef.current) {
+                      call.answer(userStreamRef.current);
+                      handleCall(call);
+                  }
+              });
+
+              peer.on('error', (err) => {
+                  console.error("PeerJS Error:", err);
+              });
+
+          } catch (e) {
+              console.error("Failed to init PeerJS", e);
+          }
+      };
+      
+      // Delay slightly to ensure media is ready
+      const timer = setTimeout(initPeer, 1000);
+      return () => {
+          clearTimeout(timer);
+          peerRef.current?.destroy();
+          peerRef.current = null;
+      }
+  }, [config.connectToHostId]);
+
+  const handleCall = (call: any) => {
+      call.on('stream', (remoteStream: MediaStream) => {
+          setRemotePeers(prev => {
+              if (prev.find(p => p.id === call.peer)) return prev;
+              return [...prev, { id: call.peer, stream: remoteStream }];
+          });
+          
+          // MIX AUDIO FOR AI
+          if (audioContextRef.current && scriptProcessorRef.current) {
+             try {
+                // Ensure we don't create feedback loop (User hears remote via <video>, so we don't output this source to destination)
+                const remoteSource = audioContextRef.current.createMediaStreamSource(remoteStream);
+                const remoteGain = audioContextRef.current.createGain();
+                remoteGain.gain.value = 1.0;
+                
+                remoteSource.connect(remoteGain);
+                remoteGain.connect(scriptProcessorRef.current);
+                console.log("Mixed remote peer audio into AI input");
+             } catch(e) {
+                 console.error("Error mixing remote audio", e);
+             }
+          }
+      });
+
+      call.on('close', () => {
+          setRemotePeers(prev => prev.filter(p => p.id !== call.peer));
+      });
+      
+      peerConnectionsRef.current.set(call.peer, call);
+  };
   
   const stopFrameSending = useCallback(() => {
     if (frameIntervalRef.current) {
@@ -244,6 +382,7 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
 
     if (isCleanup) {
         setConnectionStatus('idle');
+        peerRef.current?.destroy();
     }
   }, [stopFrameSending]);
   
@@ -318,29 +457,10 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
             tools: [{ googleSearch: {} }] 
         },
     });
-    
-    // UPDATED SYSTEM PROMPTS FOR BEHAVIOR
-    const conversationalStylePrompt = `
-    Speak just like a real person—warm, natural, and clear. 
-    Use simple language and avoid technical jargon unless the user uses it first. 
-    Be concise; don’t stretch the discussion or add unnecessary details. 
-    Stay focused on what the user asks. When needed, ask short clarifying questions, but do NOT ask repetitive questions if you have enough context.
-    IMPORTANT: If asked to create a report, use Markdown with clear headers (#).
-    
-    [WAITING BEHAVIOR]
-    If the user says "wait", "hold on", or "just a second", you must stop talking immediately and remain SILENT. 
-    Do not say "Okay I'll wait". Just be silent.
-    Wait until the user speaks again to re-engage. 
 
-    [NOISE HANDLING]
-    If you hear very short, unclear audio or background noise, ignore it. Do not respond with "I didn't catch that". Just wait for clear speech.
-    `;
-
-    const meetingBehaviorPrompt = `You are a helpful AI assistant in a meeting. Your goal is to be a seamless, helpful participant. Listen to the user and continuously observe their screen when they are sharing. Proactively use the visual information from the screen as context for your responses without waiting for the user to tell you to look. Respond directly and conversationally when the user speaks to you or when you have a relevant insight based on the conversation or the shared screen. Be proactive but not interruptive.`;
-    
     const toolInstruction = " You have access to a 'create_report' tool. Use it whenever the user asks to generate a file, report, summary, or document. Do not speak the full content of such documents; generate them using the tool.";
-
-    const userContext = `The user you are speaking with is named ${config.userName}. Address them by name naturally in the conversation, but do not overdo it.`;
+    const userContext = `The user you are speaking with is named ${config.userName}.`;
+    const contextPriorityInstruction = "CRITICAL: The user has attached files/resources. You must process and understand their content IMMEDIATELY. Do not ask the user what the system is if it is described in the files. Assume the user wants to discuss these specific files.";
 
     let resourceContext = "";
     const imageResources: RoomResource[] = [];
@@ -370,25 +490,25 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
         }
 
         if (textResources.length > 0) {
-            resourceContext += "\n\n[ATTACHED DOCUMENTS]\nThe following documents are attached to this session. You MUST refer to them to answer user questions regarding the system or topic:\n";
+            resourceContext += "\n\n[ATTACHED DOCUMENTS]\nThe following documents are attached to this session. You MUST refer to them to answer user questions regarding the system or topic. Do not ignore them:\n";
             textResources.forEach(res => {
                 try {
-                    const textContent = atob(res.content);
+                    const textContent = base64ToUtf8(res.content);
                     const truncatedContent = textContent.length > 20000 ? textContent.substring(0, 20000) + "\n...[TRUNCATED]" : textContent;
                     resourceContext += `\n--- START OF DOCUMENT: ${res.name} ---\n${truncatedContent}\n--- END OF DOCUMENT: ${res.name} ---\n`;
                     loadedResourceCount++;
                 } catch (e) { console.warn("Failed to decode text resource", res.name); }
             });
-            resourceContext += "\n[END ATTACHED DOCUMENTS]\nUse the above documents as primary context for your answers.";
+            resourceContext += "\n[END ATTACHED DOCUMENTS]\n";
         }
         loadedResourceCount += imageResources.length;
     }
 
     if (loadedResourceCount > 0 && retryCountRef.current === 0) {
-        setConversationHistory(prev => [...prev, { type: 'chat', role: 'model', text: `*System Note: Successfully loaded ${loadedResourceCount} resource(s) into context.*` }]);
+        setConversationHistory(prev => [...prev, { type: 'chat', role: 'model', text: `*System Note: Successfully loaded ${loadedResourceCount} resource(s) into context. AI is analyzing...*` }]);
     }
 
-    let systemInstruction = `${userContext} ${systemPrompt} ${resourceContext} ${conversationalStylePrompt} ${meetingBehaviorPrompt} ${toolInstruction}`;
+    let systemInstruction = `${userContext} ${systemPrompt} ${loadedResourceCount > 0 ? contextPriorityInstruction : ''} ${resourceContext} ${toolInstruction}`;
 
     const combinedContext = (config.previousContext || '') + (previousContext ? `\n\n[RECENT_DISCONNECTION_CONTEXT]\n${previousContext}` : '');
 
@@ -399,6 +519,11 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
     audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
     outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
     
+    // Ensure output context is running (fixes some browser autoplay policies)
+    if (outputAudioContextRef.current.state === 'suspended') {
+        outputAudioContextRef.current.resume();
+    }
+
     try {
         const sessionPromise = ai.live.connect({
           model: 'gemini-2.5-flash-native-audio-preview-09-2025',
@@ -418,26 +543,61 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
               setConnectionStatus('connected');
               retryCountRef.current = 0; 
               
+              const session = await sessionPromise;
+              
+              // 1. Send Image Resources FIRST
+              if (imageResources.length > 0) {
+                  console.log("Sending initial image context...");
+                  for (const img of imageResources) {
+                      try {
+                          await session.sendRealtimeInput({
+                              media: { mimeType: img.type, data: img.content }
+                          });
+                          await new Promise(r => setTimeout(r, 100)); 
+                      } catch (e) {
+                          console.error("Failed to send image context", e);
+                      }
+                  }
+              }
+
+              // 2. Setup Audio AFTER images are sent
               if (!audioContextRef.current || audioContextRef.current.state === 'closed') return;
               
               const source = audioContextRef.current.createMediaStreamSource(stream);
               mediaStreamSourceRef.current = source;
               
-              const scriptProcessor = audioContextRef.current.createScriptProcessor(4096, 1, 1);
+              // Lower buffer size to 2048 for better latency (approx 128ms)
+              const scriptProcessor = audioContextRef.current.createScriptProcessor(2048, 1, 1);
               scriptProcessorRef.current = scriptProcessor;
               
               scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
                 const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
                 const pcmBlob: GenAIBlob = createBlob(inputData);
-                sessionPromiseRef.current?.then(session => {
+                sessionPromiseRef.current?.then(activeSession => {
                     try {
-                        session.sendRealtimeInput({ media: pcmBlob });
+                        activeSession.sendRealtimeInput({ media: pcmBlob });
                     } catch (e) { }
                 }).catch(() => { });
               };
               
+              // 3. Connect Graph
               source.connect(scriptProcessor);
-              scriptProcessor.connect(audioContextRef.current.destination); 
+              const muteGain = audioContextRef.current.createGain();
+              muteGain.gain.value = 0;
+              scriptProcessor.connect(muteGain);
+              muteGain.connect(audioContextRef.current.destination);
+              
+              // 4. Re-add Remote Peers
+              remotePeers.forEach(peer => {
+                 try {
+                     const remoteSource = audioContextRef.current!.createMediaStreamSource(peer.stream);
+                     const remoteGain = audioContextRef.current!.createGain();
+                     remoteGain.gain.value = 1.0;
+                     remoteSource.connect(remoteGain);
+                     remoteGain.connect(scriptProcessor);
+                 } catch(e) { console.warn("Failed to re-attach remote peer to AI", e); }
+              });
+
             },
             onmessage: async (message: LiveServerMessage) => {
               // Handle Function Calling
@@ -454,10 +614,8 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
                                   transcript: "Generated via Live Tool"
                               };
                               
-                              // Save to History
                               if (onSaveReport) onSaveReport(report);
                               
-                              // Add "File" to Chat
                               const fileDisplayMessage = `# 📄 Report Generated: ${title}\n\n${content}`;
                               setConversationHistory(prev => [...prev, { 
                                   type: 'chat', 
@@ -465,7 +623,6 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
                                   text: fileDisplayMessage 
                               }]);
 
-                              // Respond to Tool
                               session.sendToolResponse({
                                   functionResponses: [{
                                       id: fc.id,
@@ -482,21 +639,32 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
                   setBotState('speaking');
                   const text = message.serverContent.outputTranscription.text;
                   currentOutputTranscriptionRef.current += text;
-                  targetOutputRef.current = currentOutputTranscriptionRef.current;
+                  // Optimization: Only update ref for UI if enabled
+                  if (isTranscriptEnabledRef.current) {
+                      targetOutputRef.current = currentOutputTranscriptionRef.current;
+                  }
               } else if (message.serverContent?.inputTranscription) {
                 const text = message.serverContent.inputTranscription.text;
                 currentInputTranscriptionRef.current += text;
-                setRealtimeInput(currentInputTranscriptionRef.current);
+                // Optimization: Only update ref for UI if enabled
+                if (isTranscriptEnabledRef.current) {
+                    setRealtimeInput(currentInputTranscriptionRef.current);
+                }
               }
 
               if (message.serverContent?.turnComplete) {
                 const fullInput = currentInputTranscriptionRef.current.trim();
                 const fullOutput = currentOutputTranscriptionRef.current.trim();
-                if (fullInput) {
+                
+                // NOISE FILTER
+                if (fullInput && fullInput.length > 3) {
                     const correctedInput = fullInput.charAt(0).toUpperCase() + fullInput.slice(1);
                     setConversationHistory(prev => [...prev, { type: 'transcription', speaker: 'user', text: correctedInput }]);
                 }
-                if (fullOutput) setConversationHistory(prev => [...prev, { type: 'transcription', speaker: 'model', text: fullOutput }]);
+                
+                if (fullOutput) {
+                     setConversationHistory(prev => [...prev, { type: 'transcription', speaker: 'model', text: fullOutput }]);
+                }
                 
                 currentInputTranscriptionRef.current = '';
                 currentOutputTranscriptionRef.current = '';
@@ -558,21 +726,8 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
         });
         
         sessionPromiseRef.current = sessionPromise;
-
-        sessionPromise.then(async (session) => {
-             if (imageResources.length > 0) {
-                  for (const img of imageResources) {
-                      try {
-                          await session.sendRealtimeInput({
-                              media: { mimeType: img.type, data: img.content }
-                          });
-                          await new Promise(r => setTimeout(r, 200)); 
-                      } catch (e) {
-                          console.error("Failed to send image context", e);
-                      }
-                  }
-              }
-        }).catch(err => {
+        
+        sessionPromise.catch(err => {
             console.error("Session connection failed:", err);
             setConnectionStatus('disconnected');
         });
@@ -582,7 +737,7 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
         setConnectionStatus('disconnected');
     }
 
-  }, [disconnectSession, config.userName, config.room, config.previousContext]);
+  }, [disconnectSession, config.userName, config.room, config.previousContext, remotePeers]);
 
   const reconnectRef = useRef<() => void>(() => {});
 
@@ -837,14 +992,6 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
         const isCurrentlyMuted = !userStreamRef.current.getAudioTracks()[0].enabled;
         userStreamRef.current.getAudioTracks().forEach(track => track.enabled = isCurrentlyMuted);
         setIsMuted(!isCurrentlyMuted);
-        
-        if (audioContextRef.current && scriptProcessorRef.current) {
-            const gainNode = audioContextRef.current.createGain();
-            gainNode.gain.setValueAtTime(isCurrentlyMuted ? 1 : 0, audioContextRef.current.currentTime);
-            scriptProcessorRef.current.disconnect();
-            scriptProcessorRef.current.connect(gainNode);
-            gainNode.connect(audioContextRef.current.destination);
-        }
     }
   };
   
@@ -877,6 +1024,18 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
     }
   };
 
+  const copyInviteLink = () => {
+      if (!myPeerId) return;
+      const url = new URL(window.location.href);
+      if (config.room) {
+        url.searchParams.set('room', config.room.id);
+      }
+      url.searchParams.set('hostId', myPeerId);
+      navigator.clipboard.writeText(url.toString());
+      setIsCopied(true);
+      setTimeout(() => setIsCopied(false), 2000);
+  };
+
   const botStatusColor = connectionStatus === 'disconnected'
     ? 'bg-red-500'
     : botState === 'speaking' 
@@ -892,8 +1051,16 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
   };
   const botStatusText = getBotStatusText();
 
+  // Participant Grid Calculation
+  const participants = [
+      { id: 'me', stream: userStreamRef.current, name: `${config.userName} (You)`, isLocal: true },
+      ...remotePeers.map((p, i) => ({ id: p.id, stream: p.stream, name: `Participant ${i + 1}`, isLocal: false }))
+  ];
+  
+  const visibleParticipants = participants.slice(0, 4);
+
   return (
-    <div className="flex flex-col h-full bg-zinc-950 relative overflow-hidden font-sans">
+    <div className="flex flex-col h-full bg-zinc-950 relative overflow-hidden font-sans fixed inset-0">
       {showAddBotModal && <AddBotModal onAdd={handleAddBot} onCancel={() => setShowAddBotModal(false)} />}
       
       {/* Report Modal */}
@@ -907,67 +1074,74 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
       )}
 
       {/* --- TOP SECTION: VISUAL STAGE --- */}
-      <div className="flex-none h-[40vh] min-h-[250px] bg-black relative flex items-center justify-center p-4 z-0">
+      <div className="flex-none h-[40%] min-h-[250px] bg-black relative flex items-center justify-center p-4 z-0 overflow-hidden">
          <div className="absolute inset-0 opacity-10" style={{ backgroundImage: 'radial-gradient(#333 1px, transparent 1px)', backgroundSize: '20px 20px' }}></div>
          
-         <div className="flex gap-4 w-full max-w-6xl h-full items-center justify-center relative z-10">
-             {/* LEFT: USER VIDEO / SCREEN SHARE */}
-             <div className={`relative rounded-2xl overflow-hidden shadow-2xl transition-all duration-500 border border-zinc-800 bg-zinc-900 ${isSharingScreen ? 'flex-grow aspect-video max-w-4xl' : 'aspect-video w-full max-w-md'}`}>
+         <div className="flex gap-4 w-full max-w-7xl h-full items-center justify-center relative z-10">
+             {/* LEFT: VIDEO GRID */}
+             <div className={`grid gap-4 w-full h-full ${isSharingScreen ? 'w-1/3' : 'w-2/3'} ${visibleParticipants.length === 1 ? 'grid-cols-1' : 'grid-cols-2'}`}>
                  {isSharingScreen ? (
-                     <>
-                        <video ref={screenVideoRef} autoPlay className="w-full h-full object-contain bg-zinc-900" />
+                     <div className="col-span-full h-full bg-zinc-900 rounded-xl overflow-hidden relative border border-zinc-800">
+                        <video ref={screenVideoRef} autoPlay className="w-full h-full object-contain bg-black" />
                         <div className="absolute top-2 left-2 bg-blue-600/90 text-white text-xs px-2 py-1 rounded-full flex items-center"><ScreenShareIcon className="w-3 h-3 mr-1"/> You are sharing screen</div>
-                     </>
+                     </div>
                  ) : (
-                    <>
-                        <video ref={videoRef} autoPlay muted className="w-full h-full object-cover mirror-mode" />
-                        <div className="absolute bottom-3 left-3 bg-black/50 backdrop-blur-md text-white px-3 py-1 rounded-full text-sm font-medium flex items-center">
-                            {isMuted ? <MicSlashIcon className="w-3 h-3 text-red-400 mr-2"/> : <MicIcon className="w-3 h-3 text-green-400 mr-2"/>}
-                            {config.userName}
-                        </div>
-                    </>
+                     visibleParticipants.map(p => (
+                         <VideoTile 
+                            key={p.id}
+                            stream={p.stream}
+                            name={p.name}
+                            isLocal={p.isLocal}
+                            isMirror={p.isLocal} // Mirror local user
+                         />
+                     ))
                  )}
              </div>
 
              {/* RIGHT: AI VISUALIZER */}
-             {!isSharingScreen && (
-                 <div className="aspect-video w-full max-w-md relative rounded-2xl overflow-hidden shadow-2xl border border-zinc-800 bg-zinc-900 flex flex-col items-center justify-center">
-                     {botConfig ? (
-                        <>
-                            <div className="relative flex items-center justify-center w-32 h-32">
-                                <div className={`w-24 h-24 rounded-full bg-gradient-to-br from-blue-600 to-purple-600 z-10 flex items-center justify-center shadow-[0_0_30px_rgba(59,130,246,0.4)] ${connectionStatus === 'disconnected' ? 'grayscale opacity-50' : ''}`}>
-                                    <BotIcon className="w-12 h-12 text-white/90" />
-                                </div>
-                                {botState === 'speaking' && (
-                                    <>
-                                        <div className="absolute inset-0 rounded-full border-2 border-blue-400/50 animate-[ping_2s_cubic-bezier(0,0,0.2,1)_infinite]"></div>
-                                        <div className="absolute inset-2 rounded-full border border-purple-400/30 animate-[ping_2s_cubic-bezier(0,0,0.2,1)_infinite_0.5s]"></div>
-                                    </>
-                                )}
+             <div className={`${isSharingScreen ? 'w-2/3' : 'w-1/3'} h-full relative rounded-2xl overflow-hidden shadow-2xl border border-zinc-800 bg-zinc-900 flex flex-col items-center justify-center`}>
+                 {botConfig ? (
+                    <>
+                        <div className="relative flex items-center justify-center w-24 h-24 lg:w-32 lg:h-32">
+                            <div className={`w-20 h-20 lg:w-24 lg:h-24 rounded-full bg-gradient-to-br from-blue-600 to-purple-600 z-10 flex items-center justify-center shadow-[0_0_30px_rgba(59,130,246,0.4)] ${connectionStatus === 'disconnected' ? 'grayscale opacity-50' : ''}`}>
+                                <BotIcon className="w-10 h-10 lg:w-12 lg:h-12 text-white/90" />
                             </div>
-                            
-                            <h2 className="mt-6 text-xl font-bold text-white tracking-wide">{botConfig.persona.name}</h2>
-                            <div className="mt-2 flex items-center space-x-2">
-                                <span className={`w-2 h-2 rounded-full ${botStatusColor} ${botState === 'speaking' ? 'animate-pulse' : ''}`}></span>
-                                <span className="text-sm text-zinc-400 font-medium uppercase tracking-wider">{botStatusText}</span>
-                            </div>
-
-                             {connectionStatus === 'disconnected' && (
-                                <button onClick={handleReconnect} className="mt-4 px-4 py-1.5 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-white text-xs rounded-full flex items-center transition-colors">
-                                    <ArrowPathIcon className="w-3 h-3 mr-1.5" /> Reconnect
-                                </button>
+                            {botState === 'speaking' && (
+                                <>
+                                    <div className="absolute inset-0 rounded-full border-2 border-blue-400/50 animate-[ping_2s_cubic-bezier(0,0,0.2,1)_infinite]"></div>
+                                    <div className="absolute inset-2 rounded-full border border-purple-400/30 animate-[ping_2s_cubic-bezier(0,0,0.2,1)_infinite_0.5s]"></div>
+                                </>
                             )}
-                        </>
-                     ) : (
-                        <button onClick={() => setShowAddBotModal(true)} className="group flex flex-col items-center justify-center text-zinc-500 hover:text-blue-400 transition-colors">
-                             <div className="p-4 rounded-full bg-zinc-800 group-hover:bg-zinc-700 transition-colors mb-2">
-                                <PlusIcon className="w-8 h-8"/>
-                             </div>
-                             <span className="text-sm font-medium">Add AI Participant</span>
-                        </button>
-                     )}
-                 </div>
-             )}
+                        </div>
+                        
+                        <h2 className="mt-4 text-lg lg:text-xl font-bold text-white tracking-wide text-center px-4">{botConfig.persona.name}</h2>
+                        <div className="mt-2 flex items-center space-x-2">
+                            <span className={`w-2 h-2 rounded-full ${botStatusColor} ${botState === 'speaking' ? 'animate-pulse' : ''}`}></span>
+                            <span className="text-sm text-zinc-400 font-medium uppercase tracking-wider">{botStatusText}</span>
+                        </div>
+                        
+                        {/* Invite Link Button */}
+                        {myPeerId && (
+                            <button onClick={copyInviteLink} className="mt-4 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 rounded-full flex items-center space-x-2 text-xs border border-zinc-700 transition-colors">
+                                {isCopied ? <span className="text-green-400">Copied!</span> : <><LinkIcon className="w-3 h-3 text-blue-400" /><span className="text-zinc-300">Invite Participants</span></>}
+                            </button>
+                        )}
+
+                         {connectionStatus === 'disconnected' && (
+                            <button onClick={handleReconnect} className="mt-4 px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded-full flex items-center transition-colors">
+                                <ArrowPathIcon className="w-3 h-3 mr-1.5" /> Reconnect AI
+                            </button>
+                        )}
+                    </>
+                 ) : (
+                    <button onClick={() => setShowAddBotModal(true)} className="group flex flex-col items-center justify-center text-zinc-500 hover:text-blue-400 transition-colors">
+                         <div className="p-4 rounded-full bg-zinc-800 group-hover:bg-zinc-700 transition-colors mb-2">
+                            <PlusIcon className="w-8 h-8"/>
+                         </div>
+                         <span className="text-sm font-medium">Add AI Participant</span>
+                    </button>
+                 )}
+             </div>
          </div>
 
          {/* FLOATING CONTROLS */}
@@ -991,10 +1165,23 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
       <div className="flex-grow flex flex-col min-h-0 bg-zinc-950 relative max-w-5xl mx-auto w-full border-x border-zinc-900/50">
            {/* Chat Header */}
            <div className="flex-none flex items-center justify-between px-6 py-3 border-b border-zinc-900 bg-zinc-950/80 backdrop-blur z-10">
-               <span className="text-xs font-medium text-zinc-500 uppercase tracking-widest">Live Transcript & Chat</span>
+               <div className="flex items-center">
+                   <button 
+                     onClick={() => setIsTranscriptEnabled(prev => !prev)} 
+                     className={`flex items-center space-x-2 px-3 py-1.5 rounded-full border transition-all ${isTranscriptEnabled ? 'bg-blue-900/30 border-blue-800 text-blue-200' : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300'}`}
+                     title={isTranscriptEnabled ? "Hide Transcript" : "Show Transcript"}
+                   >
+                       {isTranscriptEnabled ? <EyeIcon className="w-4 h-4"/> : <div className="w-4 h-4 rounded-full bg-zinc-600"/>}
+                       <span className="text-xs font-medium uppercase tracking-widest">
+                           {isTranscriptEnabled ? "Transcript: On" : "Transcript: Off"}
+                       </span>
+                   </button>
+                   
+                   {remotePeers.length > 0 && <span className="ml-4 px-2 py-0.5 bg-green-900/50 border border-green-800 text-green-400 text-[10px] rounded-full">{remotePeers.length} Remote User{remotePeers.length > 1 ? 's' : ''}</span>}
+               </div>
                <div className="flex items-center space-x-2">
                     <button onClick={downloadSummary} className="text-zinc-500 hover:text-white transition-colors flex items-center bg-zinc-900 py-1 px-2 rounded hover:bg-zinc-800" title="Download Report Now">
-                        <DownloadIcon className="w-4 h-4 mr-1"/> <span className="text-xs">Export Transcript</span>
+                        <DownloadIcon className="w-4 h-4 mr-1"/> <span className="text-xs">Export</span>
                     </button>
                </div>
            </div>
@@ -1006,8 +1193,17 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
                        Session Started • {new Date().toLocaleTimeString()}
                    </span>
                </div>
+               
+               {!isTranscriptEnabled && conversationHistory.length > 0 && (
+                   <div className="text-center text-xs text-zinc-700 italic my-4">
+                       Transcript hidden to optimize performance. Files and Chat messages will still appear here.
+                   </div>
+               )}
 
                {conversationHistory.map((entry, index) => {
+                   // If transcript is disabled, skip voice entries. Chat messages (manual) still show.
+                   if (!isTranscriptEnabled && entry.type === 'transcription') return null;
+
                    const isUser = entry.type === 'transcription' ? entry.speaker === 'user' : entry.role === 'user';
                    const isVoice = entry.type === 'transcription';
                    const isReportCandidate = !isUser && (entry.text.includes('# ') || entry.text.length > 300);
@@ -1033,7 +1229,7 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
                                                 className="w-full py-2 bg-zinc-700 hover:bg-blue-600 rounded text-xs font-semibold text-white flex items-center justify-center transition-colors"
                                             >
                                                 <DocumentIcon className="w-4 h-4 mr-2" /> View Full Report
-                                           </button>
+                                            </button>
                                        </div>
                                    ) : (
                                        <MarkdownRenderer content={entry.text} />
@@ -1049,8 +1245,8 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
                    );
                })}
 
-               {/* Ghosts */}
-               {realtimeInput && realtimeInput.trim().length > 0 && (
+               {/* Ghosts - Only show if transcript enabled */}
+               {isTranscriptEnabled && realtimeInput && realtimeInput.trim().length > 0 && (
                    <div className="flex justify-end">
                        <div className="max-w-[85%] md:max-w-[70%] flex flex-col items-end">
                            <div className="px-4 py-3 rounded-2xl rounded-br-sm bg-blue-600/40 text-blue-100 border border-blue-500/30 backdrop-blur-sm animate-pulse">
@@ -1063,7 +1259,7 @@ const MeetingRoom: React.FC<{ config: MeetingConfig; onLeave: (report?: RoomRepo
                    </div>
                )}
 
-               {smoothOutput && (
+               {isTranscriptEnabled && smoothOutput && (
                    <div className="flex justify-start">
                        <div className="max-w-[85%] md:max-w-[70%] flex flex-col items-start">
                            <div className="px-4 py-3 rounded-2xl rounded-bl-sm bg-zinc-800/60 text-gray-300 border border-zinc-700/50 backdrop-blur-sm">
