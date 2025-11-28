@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
 import Lobby from './components/ComplexQuery'; 
@@ -137,7 +136,7 @@ const App: React.FC = () => {
     <div className="h-[100dvh] bg-zinc-950 text-gray-100 flex flex-col font-sans overflow-hidden">
       <header className="flex-shrink-0 bg-zinc-950 border-b border-zinc-900 z-10">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-center relative">
-            <h1 className="text-xl font-semibold text-white">Gemini Conversational AI Showcase</h1>
+            <h1 className="text-xl font-semibold text-white">Expert Call Assistant</h1>
             {guestHostId && (
                 <div className="absolute right-4 top-1/2 -translate-y-1/2 px-2 py-1 bg-blue-900/50 border border-blue-800 text-blue-200 text-xs rounded-full animate-pulse">
                     Joining as Guest

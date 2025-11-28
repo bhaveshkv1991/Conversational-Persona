@@ -1,6 +1,7 @@
+
 import React from 'react';
 
-// Improved Markdown Renderer supporting Headers, Code Blocks, Lists, and basic formatting.
+// Improved Markdown Renderer supporting Headers, Code Blocks, Lists, Tables and basic formatting.
 
 export const MarkdownRenderer: React.FC<{ content: string }> = ({ content }) => {
   // Split content by lines to process block elements
@@ -9,13 +10,82 @@ export const MarkdownRenderer: React.FC<{ content: string }> = ({ content }) => 
 
   let inCodeBlock = false;
   let codeBlockContent: string[] = [];
-  let codeBlockLang = '';
+
+  let inTable = false;
+  let tableRows: string[] = [];
+
+  const cleanSplit = (rowStr: string) => {
+      const parts = rowStr.split('|');
+      // Remove first and last if empty (common in standard markdown tables like | a | b |)
+      if (parts.length > 1 && parts[0].trim() === '') parts.shift();
+      if (parts.length > 0 && parts[parts.length - 1].trim() === '') parts.pop();
+      return parts.map(p => p.trim());
+  };
+
+  const flushTable = (keyIndex: number) => {
+      if (tableRows.length === 0) {
+          inTable = false;
+          return;
+      }
+
+      const headerRow = tableRows[0];
+      const realHeaders = cleanSplit(headerRow);
+      
+      let bodyRowsRaw = tableRows.slice(1);
+      
+      // Check for separator row (e.g. |---|---|)
+      if (bodyRowsRaw.length > 0) {
+          const separatorCheck = bodyRowsRaw[0].replace(/[\s|:-]/g, '');
+          if (separatorCheck === '') {
+              bodyRowsRaw = bodyRowsRaw.slice(1);
+          }
+      }
+
+      const realRows = bodyRowsRaw.map(r => cleanSplit(r));
+
+      elements.push(
+          <div key={`table-${keyIndex}`} className="overflow-x-auto my-4 border border-zinc-700 rounded-lg">
+              <table className="min-w-full divide-y divide-zinc-700 bg-zinc-900 text-sm">
+                  <thead className="bg-zinc-800">
+                      <tr>
+                          {realHeaders.map((h, i) => (
+                              <th key={i} className="px-4 py-3 text-left font-semibold text-white uppercase tracking-wider text-xs whitespace-nowrap">
+                                  {formatInline(h)}
+                              </th>
+                          ))}
+                      </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-700">
+                      {realRows.map((row, rIdx) => (
+                          <tr key={rIdx} className={rIdx % 2 === 0 ? 'bg-zinc-900' : 'bg-zinc-800/50'}>
+                              {row.map((cell, cIdx) => (
+                                  <td key={cIdx} className="px-4 py-3 text-gray-300 whitespace-pre-wrap min-w-[120px]">
+                                      {formatInline(cell)}
+                                  </td>
+                              ))}
+                              {/* Fill missing cells */}
+                              {row.length < realHeaders.length && 
+                                Array(realHeaders.length - row.length).fill(null).map((_, i) => (
+                                    <td key={`empty-${i}`} className="px-4 py-3"></td>
+                                ))
+                              }
+                          </tr>
+                      ))}
+                  </tbody>
+              </table>
+          </div>
+      );
+      
+      tableRows = [];
+      inTable = false;
+  };
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
 
     // --- CODE BLOCKS ---
     if (line.trim().startsWith('```')) {
+      if (inTable) flushTable(i); // Flush table if code block starts
       if (inCodeBlock) {
         // End of code block
         elements.push(
@@ -30,7 +100,6 @@ export const MarkdownRenderer: React.FC<{ content: string }> = ({ content }) => 
       } else {
         // Start of code block
         inCodeBlock = true;
-        codeBlockLang = line.replace('```', '').trim();
       }
       continue;
     }
@@ -38,6 +107,19 @@ export const MarkdownRenderer: React.FC<{ content: string }> = ({ content }) => 
     if (inCodeBlock) {
       codeBlockContent.push(line);
       continue;
+    }
+
+    // --- TABLES ---
+    // Detect table line: starts with | 
+    if (line.trim().startsWith('|')) {
+        inTable = true;
+        tableRows.push(line);
+        continue;
+    }
+
+    // If we were in a table but this line is not a table line, flush.
+    if (inTable) {
+        flushTable(i);
     }
 
     // --- HEADERS ---
@@ -89,7 +171,7 @@ export const MarkdownRenderer: React.FC<{ content: string }> = ({ content }) => 
     );
   }
 
-  // Handle unclosed code block
+  // Handle unclosed blocks
   if (inCodeBlock && codeBlockContent.length > 0) {
       elements.push(
           <pre key="code-end" className="bg-zinc-900/80 p-3 rounded-lg my-3 overflow-x-auto border border-zinc-800">
@@ -100,11 +182,16 @@ export const MarkdownRenderer: React.FC<{ content: string }> = ({ content }) => 
       );
   }
 
+  if (inTable && tableRows.length > 0) {
+      flushTable(lines.length);
+  }
+
   return <>{elements}</>;
 };
 
 // Helper for bold/italic/code inline
 const formatInline = (text: string): React.ReactNode => {
+    // Basic regex split that keeps delimiters. Note: this is a simple parser.
     const parts = text.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g);
     return parts.map((part, index) => {
         if (part.startsWith('`') && part.endsWith('`')) {
