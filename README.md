@@ -1,5 +1,5 @@
 
-# Gemini Conversational AI Showcase
+# Conversational AI Showcase
 
 A high-fidelity, real-time multimodal conversational agent built with React and the Google GenAI SDK. This application demonstrates the power of the **Gemini Live API** by simulating a professional video meeting where the AI is an active, seeing, and hearing participant.
 
@@ -14,6 +14,12 @@ A high-fidelity, real-time multimodal conversational agent built with React and 
     *   **Custom Expert:** Define your own persona with custom system prompts.
 *   **Hybrid Interface:** Seamlessly switch between voice conversation and text chat, with a unified real-time transcription log.
 *   **Browser-Native:** Uses Web Audio API and WebRTC standards for a plugin-free experience.
+
+*   <img width="1313" height="853" alt="image" src="https://github.com/user-attachments/assets/afee8c89-57a0-4afc-8bb0-ffff0a2b3c32" />
+*   <img width="1402" height="853" alt="image" src="https://github.com/user-attachments/assets/6a10bf45-5c50-43d7-ae33-b83896d5ed46" />
+*   <img width="1402" height="853" alt="image" src="https://github.com/user-attachments/assets/0484c4e5-96bf-4600-8dfe-3c30d49de9fe" />
+*   <img width="1402" height="853" alt="image" src="https://github.com/user-attachments/assets/041ed9e2-d4e6-4aff-a612-469047684907" />
+*   <img width="1402" height="853" alt="image" src="https://github.com/user-attachments/assets/e86be75c-9365-4dac-9728-a06c7761cd9c" />
 
 ## 🛠️ Technologies
 
